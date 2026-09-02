@@ -1,0 +1,26 @@
+{
+  "name": "warlock-release-runner",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Local release harness for the @warlock.js (and @mongez) monorepos, run from inside @warlock.js. Installs @mongez/pkgist and holds pkgist.config.ts â€” the release registry for every package. Not published.",
+  "type": "module",
+  "scripts": {
+    "release": "node --import tsx scripts/release-family.ts gate",
+    "release:family": "node --import tsx scripts/release-family.ts gate",
+    "release:family:publish": "node --import tsx scripts/release-family.ts publish",
+    "release:family:confirm": "node --import tsx scripts/release-family.ts confirm",
+    "release:all": "node --import tsx scripts/release-family.ts gate",
+    "validate": "npm run check:features && pkgist validate",
+    "list": "pkgist list",
+    "check:features": "node --import tsx scripts/check-feature-parity.ts",
+    "test:scripts": "node --import tsx --test scripts/__tests__/warlock-family.spec.ts scripts/__tests__/local-registry-gate.spec.ts scripts/__tests__/release-family.spec.ts"
+  },
+  "dependencies": {
+    "@mongez/pkgist": "1.6.3",
+    "verdaccio": "6.10.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.23.13",
+    "typescript": "^5.9.3"
+  }
+}
