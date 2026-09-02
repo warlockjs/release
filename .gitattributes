@@ -1,0 +1,8 @@
+# Store every tracked file exactly as it is on disk — no line-ending translation.
+#
+# This repository is the release-gate baseline: byte-exact checks run against it
+# (SHA256 manifests, check-feature-parity, any diff-based gate). Git for Windows
+# sets core.autocrlf=true from system config, so without this line a fresh clone
+# or `reset --hard` rewrites every script to CRLF and those checks report a
+# CONTENT mismatch for an environmental reason. Byte-for-byte is the whole point.
+* -text
