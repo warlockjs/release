@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -566,28 +566,107 @@ export function resolveLocalPackageScript(
     index += 1;
     while (tokens[index]?.startsWith("-")) index += 1;
   }
-  const binaryName = tokens[index];
-  if (!binaryName) {
+  const head = tokens[index];
+  if (!head) {
     throw new Error(`Cannot resolve a binary from script command "${scriptCommand}".`);
   }
-  const remainder = tokens.slice(index + 1);
-  const binaryPath = resolveLocalBinaryPath(memberRoot, binaryName);
-  return { command: process.execPath, args: [binaryPath, ...remainder] };
+
+  // A script that ALREADY invokes node — `node node_modules/vitest/vitest.mjs run`
+  // — needs no resolution: it named its entry file itself, which is precisely
+  // what this workspace asks scripts to do. Trying to resolve "node" as a local
+  // binary is how the first version of this refused every such package.
+  if (head === "node" || head === "node.exe") {
+    const entry = tokens[index + 1];
+    if (!entry) {
+      throw new Error(`Script command "${scriptCommand}" invokes node with no entry file.`);
+    }
+    return {
+      command: process.execPath,
+      args: [path.resolve(memberRoot, entry), ...tokens.slice(index + 2)],
+    };
+  }
+
+  return {
+    command: process.execPath,
+    args: [resolveLocalBinaryEntry(memberRoot, head), ...tokens.slice(index + 1)],
+  };
 }
 
-function resolveLocalBinaryPath(startDirectory: string, binaryName: string): string {
+/**
+ * Resolve a bare binary name to a JS entry file node can execute.
+ *
+ * NOT `node_modules/.bin/<name>` — that is a shell shim. On Windows it is a
+ * POSIX `sh` script (the `.CMD` and `.ps1` siblings are the executable ones),
+ * so handing it to `node` fails with `SyntaxError: Invalid or unexpected token`
+ * on its first comment line. The first version of this did exactly that and
+ * refused 27 of 28 packages.
+ *
+ * So resolve through the package's own manifest instead: `bin` is either a
+ * string (one entry) or a map of names to entries, and either way it points at
+ * real JavaScript. That is also the only form that is portable — the shim
+ * layout differs per platform and per package manager, the manifest does not.
+ */
+function resolveLocalBinaryEntry(startDirectory: string, binaryName: string): string {
   let directory = path.resolve(startDirectory);
+
   for (;;) {
-    const candidate = path.join(directory, "node_modules", ".bin", binaryName);
-    if (existsSync(candidate)) return candidate;
+    const modules = path.join(directory, "node_modules");
+    const fromManifest = binaryEntryFromManifest(modules, binaryName);
+
+    if (fromManifest) return fromManifest;
+
+    // The binary name need not match the package name — `tsc` lives in
+    // `typescript`. The shim knows the answer, so read it out of the shim
+    // rather than guessing or scanning every installed package.
+    const fromShim = binaryEntryFromShim(modules, binaryName);
+
+    if (fromShim) return fromShim;
+
     const parent = path.dirname(directory);
     if (parent === directory) break;
     directory = parent;
   }
+
   throw new Error(
-    `Cannot resolve local binary "${binaryName}" from ${startDirectory} node_modules/.bin ` +
-      "or any ancestor's.",
+    `Cannot resolve local binary "${binaryName}" from ${startDirectory}: neither ` +
+      `node_modules/${binaryName}/package.json nor the node_modules/.bin/${binaryName} shim ` +
+      "named an entry, in it or any ancestor. Note this deliberately does NOT hand the shim " +
+      "itself to node: the shim is a shell script, and node fails on its first comment line.",
   );
+}
+
+/** The common case: the binary name IS the package name (`vitest`, `eslint`). */
+function binaryEntryFromManifest(modulesDirectory: string, binaryName: string): string | undefined {
+  const manifestPath = path.join(modulesDirectory, binaryName, "package.json");
+
+  if (!existsSync(manifestPath)) return undefined;
+
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    bin?: string | Record<string, string>;
+  };
+  const entry = typeof manifest.bin === "string" ? manifest.bin : manifest.bin?.[binaryName];
+
+  return entry ? path.join(modulesDirectory, binaryName, entry) : undefined;
+}
+
+/**
+ * The other case: the binary name differs from its package (`tsc` ->
+ * `typescript`). Every shim npm and pnpm generate embeds the relative path to
+ * the real entry — `../typescript/bin/tsc` — so extract that rather than
+ * scanning every installed manifest for a matching `bin` key.
+ */
+function binaryEntryFromShim(modulesDirectory: string, binaryName: string): string | undefined {
+  const shimPath = path.join(modulesDirectory, ".bin", binaryName);
+
+  if (!existsSync(shimPath)) return undefined;
+
+  const target = readFileSync(shimPath, "utf8").match(/\.\.\/[A-Za-z0-9@/_.-]+/)?.[0];
+
+  if (!target) return undefined;
+
+  const resolved = path.resolve(path.join(modulesDirectory, ".bin"), target);
+
+  return existsSync(resolved) ? resolved : undefined;
 }
 
 /** Parse and enforce the only package metadata that can cross the gate. */

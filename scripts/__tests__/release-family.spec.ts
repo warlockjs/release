@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { describe, it } from "node:test";
 
@@ -554,10 +555,39 @@ describe("per-package own quality gate (test/typecheck)", () => {
 describe("resolveLocalPackageScript (real filesystem, no mocking)", () => {
   const builderRoot = path.resolve(import.meta.dirname, "..", "..");
 
-  it("resolves a plain binary script to the real node_modules/.bin entry, invoked via node", () => {
+  // These assert that the resolved path is something NODE CAN EXECUTE, not that
+  // it equals a particular literal. The first version of this resolver returned
+  // `node_modules/.bin/<name>` and the specs asserted exactly that — so they
+  // passed while the gate refused 27 of 28 packages, because `.bin/<name>` is a
+  // shell shim and `node` dies on its first comment line. A spec that pins the
+  // wrong answer is worse than no spec: it makes the wrong answer look agreed.
+  it("resolves a plain binary script to a JS entry node can actually run", () => {
     const invocation = resolveLocalPackageScript(builderRoot, "tsx --version");
     assert.equal(invocation.command, process.execPath);
-    assert.equal(invocation.args[0], path.join(builderRoot, "node_modules", ".bin", "tsx"));
+    assert.ok(existsSync(invocation.args[0] as string), `${invocation.args[0]} must exist on disk`);
+    assert.ok(
+      !(invocation.args[0] as string).includes(`${path.sep}.bin${path.sep}`),
+      "must not resolve to the .bin shell shim — node cannot execute it",
+    );
+    assert.deepEqual(invocation.args.slice(1), ["--version"]);
+  });
+
+  it("resolves a binary whose name differs from its package (tsc -> typescript)", () => {
+    const invocation = resolveLocalPackageScript(builderRoot, "tsc --noEmit");
+    assert.ok(existsSync(invocation.args[0] as string), `${invocation.args[0]} must exist on disk`);
+    assert.ok(!(invocation.args[0] as string).includes(`${path.sep}.bin${path.sep}`));
+  });
+
+  it("passes through a script that already invokes node, resolving its entry against the package", () => {
+    const invocation = resolveLocalPackageScript(
+      builderRoot,
+      "node node_modules/tsx/dist/cli.mjs --version",
+    );
+    assert.equal(invocation.command, process.execPath);
+    assert.equal(
+      invocation.args[0],
+      path.join(builderRoot, "node_modules", "tsx", "dist", "cli.mjs"),
+    );
     assert.deepEqual(invocation.args.slice(1), ["--version"]);
   });
 
@@ -568,11 +598,12 @@ describe("resolveLocalPackageScript (real filesystem, no mocking)", () => {
     assert.notEqual(viaNpx.command, "npx");
   });
 
-  it("walks up to an ancestor's node_modules/.bin when the package's own has no such binary", () => {
-    // A nonexistent child directory under builderRoot has no node_modules of
-    // its own; resolution must still find the real ancestor .bin entry.
+  it("walks up to an ancestor when the package's own node_modules has no such binary", () => {
+    // A child directory under builderRoot has no node_modules of its own;
+    // resolution must still find the real ancestor entry.
     const invocation = resolveLocalPackageScript(path.join(builderRoot, "scripts"), "tsx --version");
-    assert.equal(invocation.args[0], path.join(builderRoot, "node_modules", ".bin", "tsx"));
+    assert.ok(existsSync(invocation.args[0] as string));
+    assert.ok((invocation.args[0] as string).startsWith(path.join(builderRoot, "node_modules")));
   });
 
   it("throws (never falls back to a shell) when no ancestor has that binary", () => {
