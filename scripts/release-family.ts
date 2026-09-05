@@ -9,13 +9,15 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { gunzipSync } from "node:zlib";
 import { assertArtifactContainsItsEntryPoints } from "./artifact-entry-points.mjs";
+
+import type { FamilyPackage } from "@mongez/pkgist";
+import pkgistConfig from "../pkgist.config.ts";
 
 import {
   runLocalRegistryPreGate,
@@ -27,7 +29,9 @@ import {
 } from "./local-registry-gate.ts";
 import {
   loadAuthoritativeWarlockFamily,
+  WARLOCK_FAMILY_NAME,
   type WarlockFamily,
+  type WarlockFamilyMember,
 } from "./warlock-family.ts";
 import { runZeroEditGeneratorGate } from "./zero-edit-generator-gate.ts";
 
@@ -156,8 +160,23 @@ async function prepareAndGate(
   const artifactDirectory = path.join(ARTIFACT_ROOT, version);
   await runtime.makeDirectory(artifactDirectory);
   const artifacts: CandidateArtifact[] = [];
+  const dirtyTreeRefusals: string[] = [];
 
   for (const member of family.members) {
+    // Adjacent to the pack, per-member, not a sweep somewhere upstream: a
+    // clean check run once, earlier, in one repo says nothing about the other
+    // 27 — and by the time this loop reaches a later member, a teammate could
+    // have re-dirtied an earlier one. Checking immediately before that
+    // member's own build+pack is the only place the check cannot go stale
+    // between "checked" and "used".
+    const cleanliness = await checkPackageTreeIsClean(member, runtime);
+    if (!cleanliness.clean) {
+      dirtyTreeRefusals.push(cleanliness.refusalMessage);
+      // Do NOT build or pack this member — but keep going. A dirty package
+      // must refuse alone; it must never take the other 27 down with it.
+      continue;
+    }
+
     await runtime.runCommand({
       command: process.execPath,
       args: [
@@ -201,6 +220,13 @@ async function prepareAndGate(
     });
   }
 
+  if (dirtyTreeRefusals.length > 0) {
+    // Every clean member above still built and packed (see the `continue`
+    // above) — this refuses the release as a whole only now, after every
+    // member has had its own independent chance, never before.
+    throw new Error(dirtyTreeRefusals.join("\n\n"));
+  }
+
   const gated = await runtime.runLocalGate(
     {
       candidateVersion: version,
@@ -221,6 +247,162 @@ async function prepareAndGate(
   assertHandoffMatchesArtifacts(handoff, artifacts, version);
   await runtime.writeHandoff(handoffPath, handoff);
   return handoff;
+}
+
+export interface DirtyPathEntry {
+  /** Path relative to the package's own git repository root, forward-slash normalized. */
+  path: string;
+  /** Two-character `git status --porcelain` code, e.g. "M ", "??", " M". */
+  status: string;
+}
+
+export interface PublishedSurfaceResolution {
+  /** Root-relative (POSIX) paths/directories that the build actually ships. */
+  roots: readonly string[];
+  /** How the surface was determined; carried into the log for the explicit waiver. */
+  source: "pkgist-config" | "no-pkgist-config-fallback-entire-tree";
+}
+
+export interface PackageCleanlinessResult {
+  clean: boolean;
+  refusalMessage: string;
+  dirtyInSurface: readonly DirtyPathEntry[];
+  waivedOutsideSurface: readonly DirtyPathEntry[];
+  surface: PublishedSurfaceResolution;
+}
+
+/**
+ * Resolve one Warlock family member's `FamilyPackage` entry straight out of
+ * `pkgist.config.ts` — the SAME object pkgist itself builds from.
+ *
+ * This deliberately does not read npm's own `files` field or `.npmignore`:
+ * none of the 28 family members declare either (verified across every
+ * top-level package.json in the workspace). What actually controls each
+ * tarball's contents here is pkgist's own per-package `srcDir` (default
+ * `"src"`, whole subtree bundled with `preserveModulesRoot`) plus its `clone`
+ * list (verbatim-copied files/directories) — see
+ * `node_modules/@mongez/pkgist/esm/compile/tsdown-compiler.mjs:36-37` and
+ * `.../build/package-builder.mjs:70`. Reading files/.npmignore here would
+ * silently answer a question this repo's build never asks.
+ */
+export function resolveFamilyPackageConfig(name: string): FamilyPackage | undefined {
+  const family = pkgistConfig.families?.find(candidate => candidate.name === WARLOCK_FAMILY_NAME);
+  return family?.packages.find(candidate => candidate.name === name);
+}
+
+/**
+ * Turn a package's pkgist config into the set of root-relative paths its
+ * build actually ships.
+ *
+ * When a member has no pkgist entry at all (should not happen for any of the
+ * 28 — `loadAuthoritativeWarlockFamily` already reconciles the family against
+ * this same config — but defended anyway), this refuses to guess and treats
+ * the ENTIRE package tree as published: fail closed, never fail open.
+ */
+export function resolvePublishedSurface(
+  packageConfig: FamilyPackage | undefined,
+): PublishedSurfaceResolution {
+  if (!packageConfig) {
+    return { roots: ["."], source: "no-pkgist-config-fallback-entire-tree" };
+  }
+  const roots = new Set<string>();
+  roots.add(normalizeRelative(packageConfig.srcDir ?? "src"));
+  roots.add("package.json");
+  for (const entry of packageConfig.clone ?? []) {
+    const source = Array.isArray(entry) ? entry[0] : entry;
+    roots.add(normalizeRelative(source));
+  }
+  return { roots: [...roots].sort(), source: "pkgist-config" };
+}
+
+function normalizeRelative(value: string): string {
+  return value.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+function isWithinSurface(relativePath: string, roots: readonly string[]): boolean {
+  return roots.some(root => root === "." || relativePath === root || relativePath.startsWith(`${root}/`));
+}
+
+/** Parse `git status --porcelain=v1 --untracked-files=all` output. */
+export function parseGitPorcelain(output: string): DirtyPathEntry[] {
+  const entries: DirtyPathEntry[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    if (line.length === 0) continue;
+    const status = line.slice(0, 2);
+    let rest = line.slice(3);
+    const renameArrow = rest.indexOf(" -> ");
+    if (renameArrow !== -1) rest = rest.slice(renameArrow + 4);
+    rest = unquoteGitPath(rest);
+    entries.push({ path: normalizeRelative(rest), status });
+  }
+  return entries;
+}
+
+function unquoteGitPath(value: string): string {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    try {
+      return JSON.parse(value) as string;
+    } catch {
+      return value.slice(1, -1);
+    }
+  }
+  return value;
+}
+
+/**
+ * Assert one package's git working tree is clean before it is built and
+ * packed — untracked files count exactly as dirty as modified ones. A dirty
+ * path OUTSIDE the resolved published surface is waived, but the waiver is
+ * always logged, never silent.
+ */
+export async function checkPackageTreeIsClean(
+  member: WarlockFamilyMember,
+  runtime: Runtime,
+): Promise<PackageCleanlinessResult> {
+  const status = await runtime.runCommand({
+    command: "git",
+    args: ["status", "--porcelain=v1", "--untracked-files=all"],
+    cwd: member.root,
+    env: { ...process.env },
+  });
+  const entries = parseGitPorcelain(status.stdout);
+  const surface = resolvePublishedSurface(resolveFamilyPackageConfig(member.name));
+
+  const dirtyInSurface: DirtyPathEntry[] = [];
+  const waivedOutsideSurface: DirtyPathEntry[] = [];
+  for (const entry of entries) {
+    if (isWithinSurface(entry.path, surface.roots)) dirtyInSurface.push(entry);
+    else waivedOutsideSurface.push(entry);
+  }
+
+  for (const waived of waivedOutsideSurface) {
+    console.warn(
+      `[release-family] WAIVED (outside published surface): ${member.name} has an uncommitted ` +
+        `change at ${waived.path} (git "${waived.status}"). Published surface: ${surface.roots.join(", ")} ` +
+        `(resolved via ${surface.source}). Not packed; not blocking the release.`,
+    );
+  }
+
+  if (dirtyInSurface.length === 0) {
+    return { clean: true, refusalMessage: "", dirtyInSurface, waivedOutsideSurface, surface };
+  }
+
+  const refusalMessage = [
+    `Refusing to pack ${member.name}: its working tree has uncommitted changes inside the published surface.`,
+    `Package root: ${member.root}`,
+    `Published surface resolved via: ${
+      surface.source === "pkgist-config"
+        ? `pkgist.config.ts (srcDir + clone): ${surface.roots.join(", ")}`
+        : "no pkgist.config.ts entry found for this package -- treating the ENTIRE package tree as published"
+    }`,
+    "Offending paths:",
+    ...dirtyInSurface.map(entry => `  - ${entry.path} (git "${entry.status}")`),
+    `Fix: commit or revert these paths in ${member.name}'s own git repository before releasing this ` +
+      `family. If a path genuinely never ships, exclude it from the published surface (srcDir/clone in ` +
+      `pkgist.config.ts) instead of releasing over it.`,
+  ].join("\n");
+
+  return { clean: false, refusalMessage, dirtyInSurface, waivedOutsideSurface, surface };
 }
 
 /** Parse and enforce the only package metadata that can cross the gate. */
@@ -697,13 +879,27 @@ async function removeFileIfPresent(filePath: string): Promise<void> {
   }
 }
 
-function resolvePkgistCli(): string {
-  const require = createRequire(import.meta.url);
-  const entry = require.resolve("@mongez/pkgist");
-  return path.join(path.dirname(entry), "cli.js");
+/**
+ * Locate pkgist's CLI entry.
+ *
+ * `@mongez/pkgist` is ESM-only: its `exports` map declares an `import`
+ * condition and nothing else, and it publishes no `./package.json` subpath.
+ * `require.resolve` performs CommonJS export resolution, finds no usable
+ * condition, and throws `ERR_PACKAGE_PATH_NOT_EXPORTED` — before a single
+ * family member is built, so the whole release gate died on its first
+ * statement. `import.meta.resolve` honours the `import` condition, which is
+ * the only one this package offers.
+ *
+ * The subpath is `./cli`, resolving to `esm/cli.mjs`. The previous form
+ * appended `cli.js` to the package root, which does not exist under any
+ * resolver — so this function had two independent faults and could never have
+ * returned a real path.
+ */
+export function resolvePkgistCli(): string {
+  return fileURLToPath(import.meta.resolve("@mongez/pkgist/cli"));
 }
 
-function resolveNpmCli(): string {
+export function resolveNpmCli(): string {
   const invokedByNpm = process.env.npm_execpath;
   if (invokedByNpm && path.isAbsolute(invokedByNpm) && /npm-cli\.js$/i.test(invokedByNpm)) {
     return invokedByNpm;

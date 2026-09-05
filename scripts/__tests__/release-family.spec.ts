@@ -6,6 +6,9 @@ import type { PublishHandoff } from "../local-registry-gate.ts";
 import {
   NPM_ORIGIN,
   assertSinglePhysicalCore,
+  checkPackageTreeIsClean,
+  parseGitPorcelain,
+  resolvePublishedSurface,
   runReleaseFamily,
   type CommandRequest,
   type ReleaseFamilyDependencies,
@@ -237,6 +240,167 @@ describe("runReleaseFamily gate mode", () => {
     assert.ok(handoff);
     assert.equal(localGateCalls, 1);
     assert.deepEqual(control.handoffs, [handoff]);
+  });
+});
+
+describe("per-package clean-tree gate (card 9555ba00)", () => {
+  const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications"
+  const createWarlockRoot = FAMILY.members[1].root; // "create-warlock"
+
+  function withGitStatus(dirtyByRoot: ReadonlyMap<string, string>): ReturnType<typeof fixture> {
+    const control = fixture();
+    const baseRunCommand = control.dependencies.runCommand!;
+    control.dependencies.runCommand = async request => {
+      if (request.command === "git" && request.args[0] === "status") {
+        control.commands.push(request);
+        const stdout = dirtyByRoot.get(request.cwd) ?? "";
+        return { stdout, stderr: "" };
+      }
+      // Delegate every non-git command to the same baseline behaviour the
+      // innocent-case fixture uses (build/pack/publish stubs).
+      return await baseRunCommand(request);
+    };
+    return control;
+  }
+
+  it("INNOCENT CASE: a clean workspace gates green and packs every member, exactly as today", async () => {
+    const control = withGitStatus(new Map());
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+
+    assert.ok(handoff);
+    const builds = control.commands.filter(command => command.args[1] === "build");
+    const packs = control.commands.filter(command => command.args[1] === "pack");
+    assert.equal(builds.length, FAMILY.members.length);
+    assert.equal(packs.length, FAMILY.members.length);
+  });
+
+  it("RED CONTROL (two-sided): dirtying ONE package's published surface refuses only that " +
+    "package while the other still builds and packs; reverting passes green again", async () => {
+    const dirty = new Map([
+      [notificationsRoot, " M src/index.ts\n"], // inside published surface (srcDir defaults to "src")
+    ]);
+    const control = withGitStatus(dirty);
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      error => {
+        const message = (error as Error).message;
+        assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
+        assert.match(message, /src\/index\.ts/);
+        return true;
+      },
+    );
+
+    // Half one: the dirty package was never built or packed.
+    const notificationsBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+    );
+    assert.equal(notificationsBuilds.length, 0, "dirty member must not be built");
+
+    // Half two — the assertion the card says is rejected without: the OTHER
+    // 27 (here, the one other fixture member) still built and packed.
+    const createWarlockBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "create-warlock",
+    );
+    const createWarlockPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(createWarlockBuilds.length, 1, "clean member must still build");
+    assert.equal(createWarlockPacks.length, 1, "clean member must still pack");
+
+    // No handoff was ever produced for the refused candidate version.
+    assert.equal(control.handoffs.length, 0);
+
+    // Revert: an all-clean tree for the same two members passes green again.
+    const cleanControl = withGitStatus(new Map());
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, cleanControl.dependencies);
+    assert.ok(handoff);
+    assert.equal(cleanControl.handoffs.length, 1);
+  });
+
+  it("a dirty file OUTSIDE the published surface does not refuse, and logs an explicit waiver", async () => {
+    const dirty = new Map([
+      // "tests/" is not the configured srcDir ("src") and not in this
+      // package's pkgist `clone` list, so it never ships.
+      [notificationsRoot, "?? tests/fixtures/new-fixture.ts\n"],
+    ]);
+    const control = withGitStatus(dirty);
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+      assert.ok(handoff, "a surface-external dirty file must not block the release");
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const waiverLine = warnings.find(line => line.includes("WAIVED"));
+    assert.ok(waiverLine, "an explicit waiver line must be logged for the surface-external dirty file");
+    assert.match(waiverLine!, /@warlock\.js\/notifications/);
+    assert.match(waiverLine!, /tests\/fixtures\/new-fixture\.ts/);
+  });
+});
+
+describe("published surface resolution", () => {
+  it("resolves the real notifications package surface from pkgist.config.ts (srcDir + clone)", () => {
+    // No injected config here on purpose: this proves the resolution reads
+    // the ACTUAL builder/pkgist.config.ts, not a guess from the path.
+    const surface = resolvePublishedSurface({
+      name: "@warlock.js/notifications",
+      root: "../notifications",
+      clone: ["README.md", "LICENSE", "CHANGELOG.md", "skills", "llms.txt", "llms-full.txt"],
+    });
+    assert.equal(surface.source, "pkgist-config");
+    assert.ok(surface.roots.includes("src"));
+    assert.ok(surface.roots.includes("package.json"));
+    assert.ok(surface.roots.includes("skills"));
+    assert.ok(surface.roots.includes("llms-full.txt"));
+  });
+
+  it("falls back to treating the entire tree as published when a package has no pkgist entry", () => {
+    const surface = resolvePublishedSurface(undefined);
+    assert.equal(surface.source, "no-pkgist-config-fallback-entire-tree");
+    assert.deepEqual(surface.roots, ["."]);
+  });
+});
+
+describe("parseGitPorcelain", () => {
+  it("parses modified, untracked, and renamed entries", () => {
+    const entries = parseGitPorcelain(
+      [" M src/index.ts", "?? skills/new-skill/SKILL.md", "R  old.ts -> src/new.ts", ""].join("\n"),
+    );
+    assert.deepEqual(entries, [
+      { path: "src/index.ts", status: " M" },
+      { path: "skills/new-skill/SKILL.md", status: "??" },
+      { path: "src/new.ts", status: "R " },
+    ]);
+  });
+});
+
+describe("checkPackageTreeIsClean", () => {
+  it("runs git status scoped to the member's own package root", async () => {
+    const seenCwds: string[] = [];
+    const runtimeStub = {
+      runCommand: async (request: CommandRequest) => {
+        seenCwds.push(request.cwd);
+        assert.equal(request.command, "git");
+        assert.deepEqual(request.args, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        return { stdout: "", stderr: "" };
+      },
+    };
+    const member = {
+      name: "@warlock.js/notifications",
+      root: path.resolve("notifications"),
+      configuredRoot: path.resolve("notifications"),
+      version: VERSION,
+    };
+    const result = await checkPackageTreeIsClean(member, runtimeStub as never);
+    assert.equal(result.clean, true);
+    assert.deepEqual(seenCwds, [member.root]);
   });
 });
 

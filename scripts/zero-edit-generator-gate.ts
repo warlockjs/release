@@ -541,7 +541,7 @@ function formatError(error: unknown): string {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
-function defaultResolveNpmCliPath(): string {
+export function defaultResolveNpmCliPath(): string {
   const require = createRequire(import.meta.url);
   const candidates: string[] = [];
   try {

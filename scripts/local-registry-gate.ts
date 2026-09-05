@@ -494,7 +494,7 @@ function isUnsafeInheritedNpmVariable(key: string): boolean {
   );
 }
 
-function defaultResolveNpmCliPath(): string {
+export function defaultResolveNpmCliPath(): string {
   const candidates: string[] = [];
   if (process.env.npm_execpath?.endsWith("npm-cli.js")) {
     candidates.push(process.env.npm_execpath);
@@ -630,7 +630,22 @@ export async function runLocalRegistryPreGate(
     assertLoopbackRegistry(registryUrl, registry.port);
     event("registry-started", String(registry.port));
 
-    await writeTextFile(npmrcPath, `registry=${registryUrl}\ncache=${cacheDirectory}\nalways-auth=false\n`);
+    // npm refuses `publish` with ENEEDAUTH unless a token exists for the target
+    // registry HOST, regardless of what the registry itself allows — this
+    // Verdaccio grants `publish: $all`, and npm still would not send the
+    // request. The token is a placeholder: the owned registry is loopback-only,
+    // its lifetime is this gate, and its htpasswd file is empty, so nothing
+    // authenticates against anything. Its only job is to satisfy the client.
+    //
+    // The key must be the registry's host and port with no scheme, which is
+    // why it is derived from `registryUrl` rather than written by hand — the
+    // port is assigned by the OS at start-up and differs every run.
+    const registryAuthKey = registryUrl.replace(/^https?:/, "");
+    await writeTextFile(
+      npmrcPath,
+      `registry=${registryUrl}\ncache=${cacheDirectory}\nalways-auth=false\n` +
+        `${registryAuthKey}:_authToken=local-registry-gate\n`,
+    );
     await writeTextFile(globalNpmrcPath, "");
     const npmCliPath = resolveNpmCliPath();
     if (!isAbsolute(npmCliPath) || !npmCliPath.endsWith("npm-cli.js")) {
