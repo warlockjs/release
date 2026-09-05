@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -89,6 +89,14 @@ export interface ReleaseFamilyDependencies {
   sha256File?(filePath: string): Promise<string>;
   resolvePkgistCli?(): string;
   resolveNpmCli?(): string;
+  /**
+   * Turn one package.json script's command text into a directly-invocable
+   * binary + args, resolved from that package's own (or an ancestor's)
+   * `node_modules/.bin`. Never shells the script text verbatim — a script
+   * that itself reads `npx tsc --noEmit` must not be handed to a shell,
+   * because that re-enters the very `npx` failure mode canon forbids.
+   */
+  resolvePackageScript?(memberRoot: string, scriptCommand: string): ResolvedScriptInvocation;
   runLocalGate?(
     input: LocalRegistryGateInput,
     dependencies: LocalRegistryGateDependencies,
@@ -100,6 +108,11 @@ export type BuiltManifest = Record<string, unknown> & {
   name?: unknown;
   version?: unknown;
 };
+
+export interface ResolvedScriptInvocation {
+  command: string;
+  args: readonly string[];
+}
 
 export interface ArtifactInspection {
   manifest: BuiltManifest;
@@ -161,6 +174,7 @@ async function prepareAndGate(
   await runtime.makeDirectory(artifactDirectory);
   const artifacts: CandidateArtifact[] = [];
   const dirtyTreeRefusals: string[] = [];
+  const qualityRefusals: string[] = [];
 
   for (const member of family.members) {
     // Adjacent to the pack, per-member, not a sweep somewhere upstream: a
@@ -174,6 +188,18 @@ async function prepareAndGate(
       dirtyTreeRefusals.push(cleanliness.refusalMessage);
       // Do NOT build or pack this member — but keep going. A dirty package
       // must refuse alone; it must never take the other 27 down with it.
+      continue;
+    }
+
+    // Same call site, same shape: the gate proves the family graph, the
+    // pins, and a clean tree per member, but none of that says the
+    // package's OWN test/typecheck scripts are green — a package can be red
+    // in its own repository and still sail through everything above. Check
+    // it here, immediately before this member's own build+pack, so a red
+    // suite refuses ONLY this member and the other 27 keep going.
+    const quality = await checkPackageOwnQuality(member, runtime);
+    if (!quality.passed) {
+      qualityRefusals.push(quality.refusalMessage);
       continue;
     }
 
@@ -220,11 +246,11 @@ async function prepareAndGate(
     });
   }
 
-  if (dirtyTreeRefusals.length > 0) {
-    // Every clean member above still built and packed (see the `continue`
-    // above) — this refuses the release as a whole only now, after every
-    // member has had its own independent chance, never before.
-    throw new Error(dirtyTreeRefusals.join("\n\n"));
+  if (dirtyTreeRefusals.length > 0 || qualityRefusals.length > 0) {
+    // Every clean, green member above still built and packed (see the two
+    // `continue`s above) — this refuses the release as a whole only now,
+    // after every member has had its own independent chance, never before.
+    throw new Error([...dirtyTreeRefusals, ...qualityRefusals].join("\n\n"));
   }
 
   const gated = await runtime.runLocalGate(
@@ -403,6 +429,165 @@ export async function checkPackageTreeIsClean(
   ].join("\n");
 
   return { clean: false, refusalMessage, dirtyInSurface, waivedOutsideSurface, surface };
+}
+
+/** The scripts this gate holds every family member to, in check order. */
+const OWN_QUALITY_SCRIPTS = ["test", "typecheck"] as const;
+
+export interface PackageOwnQualityResult {
+  passed: boolean;
+  refusalMessage: string;
+  /** Script names this package declares nothing for — reported, never silent. */
+  skipped: readonly string[];
+}
+
+/**
+ * Run one package's OWN `test` and `typecheck` scripts, immediately before
+ * it is built and packed.
+ *
+ * The rest of this gate proves the family graph, exact pins, a clean single
+ * -Core install, generated-app typecheck, boot, build, start, and browser
+ * assertions against a staged local registry — a great deal. None of it runs
+ * a member's own test suite or typechecks its own source: a package can be
+ * red in its own repository, at HEAD, with a clean working tree, and still
+ * reach every one of those checks unexamined. That happened for real (`web`
+ * failed 3 test files / 9 tests and its typecheck exited 2, and both shipped
+ * in 5.3.0 and 5.3.1) before this check existed.
+ *
+ * A missing script is not evidence of health — it is a claim this gate could
+ * not verify, so it is reported by name and treated as a skip, never as a
+ * silent pass (see the `skipped` field and the console line emitted for each
+ * one).
+ */
+export async function checkPackageOwnQuality(
+  member: WarlockFamilyMember,
+  runtime: Runtime,
+): Promise<PackageOwnQualityResult> {
+  const manifestPath = path.join(member.root, "package.json");
+  const manifest = parseManifest(await runtime.readTextFile(manifestPath), manifestPath);
+  const scripts = isStringRecord(manifest.scripts) ? manifest.scripts : {};
+
+  const failures: string[] = [];
+  const skipped: string[] = [];
+
+  for (const scriptName of OWN_QUALITY_SCRIPTS) {
+    const command = scripts[scriptName];
+    if (typeof command !== "string" || command.trim().length === 0) {
+      skipped.push(scriptName);
+      console.warn(
+        `[release-family] SKIPPED (no "${scriptName}" script): ${member.name} declares no ` +
+          `"${scriptName}" script in ${manifestPath}; this gate could not check it.`,
+      );
+      continue;
+    }
+
+    let invocation: ResolvedScriptInvocation;
+    try {
+      invocation = runtime.resolvePackageScript(member.root, command);
+    } catch (error) {
+      failures.push(`"${scriptName}" (resolving "${command}"): ${formatError(error)}`);
+      continue;
+    }
+
+    try {
+      await runtime.runCommand({
+        command: invocation.command,
+        args: invocation.args,
+        cwd: member.root,
+        env: qualityCheckEnvironment(process.env),
+      });
+    } catch (error) {
+      failures.push(
+        `"${scriptName}" (${invocation.command} ${invocation.args.join(" ")}): ${formatError(error)}`,
+      );
+    }
+  }
+
+  if (failures.length === 0) {
+    return { passed: true, refusalMessage: "", skipped };
+  }
+
+  const refusalMessage = [
+    `Refusing to pack ${member.name}: its own quality gate is red.`,
+    `Package root: ${member.root}`,
+    "Failing scripts:",
+    ...failures.map(failure => `  - ${failure}`),
+    `Fix: make ${member.name}'s own failing script(s) pass in its own repository before ` +
+      `releasing this family.`,
+  ].join("\n");
+
+  return { passed: false, refusalMessage, skipped };
+}
+
+/**
+ * Strip `HTTP_PORT` and `NODE_ENV` from the environment handed to a
+ * package's own `test`/`typecheck` child process.
+ *
+ * This machine exports both. An inherited `NODE_ENV=production` silently
+ * exercises production branches in what is meant to be a plain quality
+ * check, and an inherited `HTTP_PORT` can collide with whatever port a
+ * package's own tests bind. Deleting rather than overriding: a script that
+ * needs its own value still sets it itself.
+ */
+export function qualityCheckEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...source };
+  delete env.HTTP_PORT;
+  delete env.NODE_ENV;
+  return env;
+}
+
+/**
+ * Resolve one package.json script's command text to a directly-invocable
+ * binary, walking `node_modules/.bin` from the package's own root up through
+ * its ancestors (npm's own hoisting resolution order) — mirroring how
+ * `resolvePkgistCli`/`resolveNpmCli` already resolve a real file path instead
+ * of trusting a shell to find one.
+ *
+ * A script may itself read `npx <bin> ...` (or `npx -y <bin> ...`): that
+ * `npx` token is dropped rather than shelled, because handing that text to a
+ * shell verbatim re-enters the exact `npx` resolution failure this workspace
+ * forbids invoking directly (see AGENTS.md / the card). Any other leading
+ * flags/tokens before the binary name are not supported — the scripts this
+ * gate checks (`test`, `typecheck`) are simple `<bin> [...args]` or
+ * `npx <bin> [...args]` forms across the family.
+ *
+ * npm installs a binary at `node_modules/.bin/<name>` as a plain,
+ * extension-less JS file (a shebang line node ignores when the file itself
+ * is passed to `node`), so invoking `process.execPath <thatPath> ...args`
+ * runs the real binary without a shell and without `npx`.
+ */
+export function resolveLocalPackageScript(
+  memberRoot: string,
+  scriptCommand: string,
+): ResolvedScriptInvocation {
+  const tokens = scriptCommand.trim().split(/\s+/).filter(token => token.length > 0);
+  let index = 0;
+  if (tokens[index] === "npx") {
+    index += 1;
+    while (tokens[index]?.startsWith("-")) index += 1;
+  }
+  const binaryName = tokens[index];
+  if (!binaryName) {
+    throw new Error(`Cannot resolve a binary from script command "${scriptCommand}".`);
+  }
+  const remainder = tokens.slice(index + 1);
+  const binaryPath = resolveLocalBinaryPath(memberRoot, binaryName);
+  return { command: process.execPath, args: [binaryPath, ...remainder] };
+}
+
+function resolveLocalBinaryPath(startDirectory: string, binaryName: string): string {
+  let directory = path.resolve(startDirectory);
+  for (;;) {
+    const candidate = path.join(directory, "node_modules", ".bin", binaryName);
+    if (existsSync(candidate)) return candidate;
+    const parent = path.dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  throw new Error(
+    `Cannot resolve local binary "${binaryName}" from ${startDirectory} node_modules/.bin ` +
+      "or any ancestor's.",
+  );
 }
 
 /** Parse and enforce the only package metadata that can cross the gate. */
@@ -795,6 +980,7 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
     sha256File: dependencies.sha256File ?? defaultSha256File,
     resolvePkgistCli: dependencies.resolvePkgistCli ?? resolvePkgistCli,
     resolveNpmCli: dependencies.resolveNpmCli ?? resolveNpmCli,
+    resolvePackageScript: dependencies.resolvePackageScript ?? resolveLocalPackageScript,
     runLocalGate: dependencies.runLocalGate ?? runLocalRegistryPreGate,
     now: dependencies.now ?? (() => new Date()),
   };

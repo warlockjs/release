@@ -8,6 +8,8 @@ import {
   assertSinglePhysicalCore,
   checkPackageTreeIsClean,
   parseGitPorcelain,
+  qualityCheckEnvironment,
+  resolveLocalPackageScript,
   resolvePublishedSurface,
   runReleaseFamily,
   type CommandRequest,
@@ -55,8 +57,23 @@ function fixture(
     removeDirectory: async () => undefined,
     removeFile: async () => undefined,
     writeTextFile: async () => undefined,
+    readTextFile: async filePath => {
+      // Default innocent-case package.json: both own-quality scripts declared.
+      if (path.basename(filePath) === "package.json") {
+        return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
+      }
+      throw new Error(`fixture readTextFile has no stub for ${filePath}`);
+    },
     resolvePkgistCli: () => path.resolve("pkgist", "dist", "cli.js"),
     resolveNpmCli: () => path.resolve("npm", "bin", "npm-cli.js"),
+    // Default stand-in: every quality-check script "resolves" and its run is
+    // handled by the base runCommand stub below (which answers everything
+    // with an empty success), so tests unrelated to the own-quality gate see
+    // it pass silently. Tests that DO care override this dependency.
+    resolvePackageScript: (memberRoot, scriptCommand) => ({
+      command: "resolved-node",
+      args: [memberRoot, scriptCommand],
+    }),
     runCommand: async request => {
       commands.push(request);
       if (request.args[1] === "pack") {
@@ -342,6 +359,238 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
     assert.ok(waiverLine, "an explicit waiver line must be logged for the surface-external dirty file");
     assert.match(waiverLine!, /@warlock\.js\/notifications/);
     assert.match(waiverLine!, /tests\/fixtures\/new-fixture\.ts/);
+  });
+});
+
+describe("per-package own quality gate (test/typecheck)", () => {
+  const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications"
+
+  // Deterministic stand-in for the real `resolveLocalPackageScript`: marks a
+  // command as "already resolved to a direct binary" (`command` is never
+  // "npm" or "npx") so assertions below can tell a quality-check invocation
+  // apart from a build/pack invocation without touching a real filesystem.
+  const RESOLVED_MARKER = "resolved-binary";
+
+  function resolvingDependencies(): Pick<ReleaseFamilyDependencies, "resolvePackageScript"> {
+    return {
+      resolvePackageScript: (memberRoot, scriptCommand) => ({
+        command: RESOLVED_MARKER,
+        args: [memberRoot, scriptCommand],
+      }),
+    };
+  }
+
+  function withPackageScripts(
+    scriptsByRoot: ReadonlyMap<string, Record<string, string>>,
+    runScriptResult: (request: CommandRequest) => { stdout: string; stderr: string } | Error = () => ({
+      stdout: "",
+      stderr: "",
+    }),
+  ): ReturnType<typeof fixture> {
+    const control = fixture(resolvingDependencies());
+    const baseRunCommand = control.dependencies.runCommand!;
+    control.dependencies.readTextFile = async filePath => {
+      if (path.basename(filePath) === "package.json") {
+        const root = path.dirname(filePath);
+        const scripts = scriptsByRoot.get(root) ?? { test: "vitest run", typecheck: "tsc --noEmit" };
+        return JSON.stringify({ scripts });
+      }
+      throw new Error(`unexpected readTextFile ${filePath}`);
+    };
+    control.dependencies.runCommand = async request => {
+      if (request.command === RESOLVED_MARKER) {
+        control.commands.push(request);
+        const outcome = runScriptResult(request);
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      }
+      return await baseRunCommand(request);
+    };
+    return control;
+  }
+
+  it("INNOCENT CASE: every member declares green test/typecheck scripts and the gate " +
+    "passes and behaves as it does today", async () => {
+    // Pollute the ambient environment the way the real machine does, to
+    // prove the child env is scrubbed rather than merely usually-absent.
+    const previousHttpPort = process.env.HTTP_PORT;
+    const previousNodeEnv = process.env.NODE_ENV;
+    process.env.HTTP_PORT = "4000";
+    process.env.NODE_ENV = "production";
+    try {
+      const control = withPackageScripts(new Map());
+      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+
+      assert.ok(handoff);
+      const runs = control.commands.filter(command => command.command === RESOLVED_MARKER);
+      // Both fixture members × both scripts (test, typecheck).
+      assert.equal(runs.length, FAMILY.members.length * 2);
+      // Never shelled through npm/npx: each run's command is the resolved
+      // binary marker, never "npm" or an args[1] of "run".
+      assert.ok(runs.every(run => run.command === RESOLVED_MARKER));
+      // HTTP_PORT and NODE_ENV are cleared from every quality-check child env.
+      assert.ok(runs.every(run => !("HTTP_PORT" in run.env)));
+      assert.ok(runs.every(run => !("NODE_ENV" in run.env)));
+
+      const builds = control.commands.filter(command => command.args[1] === "build");
+      const packs = control.commands.filter(command => command.args[1] === "pack");
+      assert.equal(builds.length, FAMILY.members.length);
+      assert.equal(packs.length, FAMILY.members.length);
+    } finally {
+      if (previousHttpPort === undefined) delete process.env.HTTP_PORT;
+      else process.env.HTTP_PORT = previousHttpPort;
+      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it("RED CONTROL (two-sided): breaking ONE package's test suite refuses only that package " +
+    "while the other still builds and packs; restoring passes green again", async () => {
+    const control = withPackageScripts(new Map(), request => {
+      // args[1] carries the resolved script's original command text ("vitest run").
+      if (request.cwd === notificationsRoot && request.args[1] === "vitest run") {
+        return new Error(
+          `${process.execPath} exited 1: FAIL src/index.spec.ts > it explodes\nAssertionError`,
+        );
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      error => {
+        const message = (error as Error).message;
+        assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
+        assert.match(message, /its own quality gate is red/);
+        assert.match(message, new RegExp(`"test" \\(${RESOLVED_MARKER} `));
+        return true;
+      },
+    );
+
+    // Half one: the red member was never built or packed.
+    const notificationsBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+    );
+    assert.equal(notificationsBuilds.length, 0, "red member must not be built");
+
+    // Half two — the assertion that matters: the OTHER 27 (here, the one
+    // other fixture member) still built and packed despite the red sibling.
+    const createWarlockBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "create-warlock",
+    );
+    const createWarlockPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(createWarlockBuilds.length, 1, "clean sibling must still build");
+    assert.equal(createWarlockPacks.length, 1, "clean sibling must still pack");
+    assert.equal(control.handoffs.length, 0);
+
+    // Restore: an all-green set of scripts for the same two members passes
+    // green again.
+    const cleanControl = withPackageScripts(new Map());
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, cleanControl.dependencies);
+    assert.ok(handoff);
+    assert.equal(cleanControl.handoffs.length, 1);
+  });
+
+  it("a package with no \"test\" script produces a reported-skip line and does NOT refuse", async () => {
+    const control = withPackageScripts(
+      new Map([[notificationsRoot, { typecheck: "tsc --noEmit" }]]),
+    );
+
+    const originalWarn = console.warn;
+    const warnings: string[] = [];
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args.map(String).join(" "));
+    };
+    try {
+      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+      assert.ok(handoff, "a missing test script must not block the release");
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    const skipLine = warnings.find(line => line.includes("SKIPPED"));
+    assert.ok(skipLine, "a reported-skip line must be logged for the missing script");
+    assert.match(skipLine!, /@warlock\.js\/notifications/);
+    assert.match(skipLine!, /no "test" script/);
+
+    // Only "typecheck" ran for the skipped member; "test" never did.
+    const notificationsRuns = control.commands.filter(
+      command => command.command === RESOLVED_MARKER && command.cwd === notificationsRoot,
+    );
+    assert.deepEqual(notificationsRuns.map(command => command.args[1]), ["tsc --noEmit"]);
+  });
+
+  it("cannot resolve a script's binary: reported as a refusal for that package, never a " +
+    "silent pass and never a shelled npx fallback", async () => {
+    const control = fixture({
+      readTextFile: async filePath => {
+        if (path.basename(filePath) === "package.json") {
+          return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
+        }
+        throw new Error(`unexpected readTextFile ${filePath}`);
+      },
+      resolvePackageScript: () => {
+        throw new Error("no node_modules/.bin/vitest found");
+      },
+    });
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      error => {
+        const message = (error as Error).message;
+        assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
+        assert.match(message, /resolving "vitest run"/);
+        assert.match(message, /no node_modules\/\.bin\/vitest found/);
+        return true;
+      },
+    );
+    const runCommands = control.commands.filter(command => command.args[1] === "run");
+    assert.equal(runCommands.length, 0, "must never fall back to shelling `npm run`/`npx`");
+  });
+});
+
+describe("resolveLocalPackageScript (real filesystem, no mocking)", () => {
+  const builderRoot = path.resolve(import.meta.dirname, "..", "..");
+
+  it("resolves a plain binary script to the real node_modules/.bin entry, invoked via node", () => {
+    const invocation = resolveLocalPackageScript(builderRoot, "tsx --version");
+    assert.equal(invocation.command, process.execPath);
+    assert.equal(invocation.args[0], path.join(builderRoot, "node_modules", ".bin", "tsx"));
+    assert.deepEqual(invocation.args.slice(1), ["--version"]);
+  });
+
+  it("strips a leading npx (and its flags) rather than shelling it, resolving the same real binary", () => {
+    const direct = resolveLocalPackageScript(builderRoot, "tsx --version");
+    const viaNpx = resolveLocalPackageScript(builderRoot, "npx -y tsx --version");
+    assert.deepEqual(viaNpx, direct);
+    assert.notEqual(viaNpx.command, "npx");
+  });
+
+  it("walks up to an ancestor's node_modules/.bin when the package's own has no such binary", () => {
+    // A nonexistent child directory under builderRoot has no node_modules of
+    // its own; resolution must still find the real ancestor .bin entry.
+    const invocation = resolveLocalPackageScript(path.join(builderRoot, "scripts"), "tsx --version");
+    assert.equal(invocation.args[0], path.join(builderRoot, "node_modules", ".bin", "tsx"));
+  });
+
+  it("throws (never falls back to a shell) when no ancestor has that binary", () => {
+    assert.throws(
+      () => resolveLocalPackageScript(builderRoot, "definitely-not-a-real-binary --flag"),
+      /Cannot resolve local binary "definitely-not-a-real-binary"/,
+    );
+  });
+});
+
+describe("qualityCheckEnvironment", () => {
+  it("clears HTTP_PORT and NODE_ENV without mutating the source environment", () => {
+    const source = { HTTP_PORT: "4000", NODE_ENV: "production", KEEP: "yes" };
+    const result = qualityCheckEnvironment(source);
+    assert.equal("HTTP_PORT" in result, false);
+    assert.equal("NODE_ENV" in result, false);
+    assert.equal(result.KEEP, "yes");
+    assert.equal(source.HTTP_PORT, "4000", "source object must be untouched");
   });
 });
 
