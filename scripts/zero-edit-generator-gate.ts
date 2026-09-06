@@ -82,7 +82,7 @@ export interface ZeroEditGeneratorGateDependencies {
   onEvent?(event: string, detail?: string): void;
 }
 
-interface FeatureCatalog {
+export interface FeatureCatalog {
   schemaVersion: 1;
   source: "installed-core-feature-map";
   coreRoot: string;
@@ -430,7 +430,7 @@ async function assertInstalledIdentity(runtime: Runtime, root: string, name: str
   }
 }
 
-function parseFeatureCatalog(source: string, coreRoot: string): FeatureCatalog {
+export function parseFeatureCatalog(source: string, coreRoot: string): FeatureCatalog {
   const value = parseObject(source, "feature catalog") as Partial<FeatureCatalog>;
   if (value.schemaVersion !== 1 || value.source !== "installed-core-feature-map" || value.complete !== true) {
     throw new Error("Feature adapter must return a complete schemaVersion 1 installed-core-feature-map catalog.");
