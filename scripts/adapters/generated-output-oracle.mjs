@@ -585,8 +585,12 @@ async function exercisePhase({ appRoot, introducedRouteRows }) {
     const cleanExit = await stopServerCleanly(child);
     await waitForPortRelease(port, PORT_RELEASE_TIMEOUT_MS).catch(() => undefined);
     throw new Error(
-      `Development boot for ${appRoot} did not become ready: ${String(error)}\n${stderrTail}\n` +
-        `(booted=${booted} cleanExit=${cleanExit})`,
+      // Captured output FIRST, cause LAST. The gate truncates an adapter's
+      // stderr to its TAIL (`zero-edit-generator-gate.ts:376`), so a message
+      // leading with the cause loses exactly the line worth reading.
+      `--- captured server output ---\n${stderrTail}\n--- end captured server output ---\n` +
+        `Development boot for ${appRoot} did not become ready ` +
+        `(booted=${booted} cleanExit=${cleanExit}): ${String(error)}`,
     );
   }
 
@@ -639,8 +643,9 @@ async function exerciseProductionPhase({ appRoot, introducedRouteRows }) {
     const cleanExit = await stopServerCleanly(child);
     await waitForPortRelease(port, PORT_RELEASE_TIMEOUT_MS).catch(() => undefined);
     throw new Error(
-      `Production boot for ${appRoot} did not become ready: ${String(error)}\n${stderrTail}\n` +
-        `(booted=${booted} cleanExit=${cleanExit})`,
+      `--- captured server output ---\n${stderrTail}\n--- end captured server output ---\n` +
+        `Production boot for ${appRoot} did not become ready ` +
+        `(booted=${booted} cleanExit=${cleanExit}): ${String(error)}`,
     );
   }
 
