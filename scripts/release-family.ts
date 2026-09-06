@@ -59,10 +59,50 @@ export interface ReleaseOptions {
   mode: ReleaseMode;
   version: string;
   handoffPath?: string;
+  /**
+   * Opt-in: reuse previously built tarballs for the SAME version instead of
+   * rebuilding, but only when every one of them re-hashes to its recorded
+   * SHA-256 AND every package's git HEAD and working tree match what was
+   * recorded at build time. Any failed check falls back to a full rebuild,
+   * naming the offending package -- never a silent half-reuse. Ignored
+   * outside gate mode.
+   */
+  reuseArtifacts?: boolean;
+  /**
+   * Opt-in: run only the baseline row plus the named feature rows (and the
+   * composed row when "composed" is explicitly included) instead of the full
+   * matrix. A run using this can NEVER emit a publish handoff. Ignored
+   * outside gate mode.
+   */
+  only?: readonly string[];
+}
+
+/** One family member's recorded build, kept alongside its tarball so a later run can prove reuse is still valid. */
+export interface BuildProvenanceEntry {
+  name: string;
+  version: string;
+  tarballPath: string;
+  sha256: string;
+  /** Full 40-char lowercase git commit hash, from that package's own repo. */
+  gitHead: string;
+  /** Full `git status --porcelain` for that package's repo, captured at build time -- not scoped to the published surface. */
+  gitDirtyEntries: readonly DirtyPathEntry[];
+  builtAt: string;
+}
+
+export interface BuildProvenance {
+  schemaVersion: 1;
+  family: typeof WARLOCK_FAMILY_NAME;
+  version: string;
+  members: readonly BuildProvenanceEntry[];
 }
 
 export interface ReleaseHandoff extends PublishHandoff {
   subjects: readonly string[];
+  /** Set only when this handoff's artifacts came from `--reuse-artifacts` instead of a fresh build. */
+  reusedArtifacts?: boolean;
+  /** The exact provenance proving each reused artifact is still valid -- carried into the handoff so the fact is never lost. */
+  reuseProvenance?: readonly BuildProvenanceEntry[];
 }
 
 export interface CommandRequest {
@@ -87,6 +127,8 @@ export interface ReleaseFamilyDependencies {
   makeTemporaryDirectory?(prefix: string): Promise<string>;
   removeDirectory?(directory: string): Promise<void>;
   removeFile?(filePath: string): Promise<void>;
+  /** Used only by `--reuse-artifacts` to prove a recorded tarball still exists before re-hashing it. */
+  fileExists?(filePath: string): Promise<boolean>;
   writeHandoff?(filePath: string, handoff: ReleaseHandoff): Promise<void>;
   sha256File?(filePath: string): Promise<string>;
   resolvePkgistCli?(): string;
@@ -145,7 +187,10 @@ export async function runReleaseFamily(
   );
 
   if (options.mode === "gate") {
-    return await prepareAndGate(family, options.version, handoffPath, runtime);
+    return await prepareAndGate(family, options.version, handoffPath, runtime, {
+      reuseArtifacts: options.reuseArtifacts,
+      only: options.only,
+    });
   }
 
   const handoff = parseAndValidateHandoff(
@@ -163,18 +208,115 @@ export async function runReleaseFamily(
   await confirmAtOrigin(handoff, runtime);
 }
 
+export interface PrepareAndGateOptions {
+  reuseArtifacts?: boolean;
+  only?: readonly string[];
+}
+
 async function prepareAndGate(
   family: WarlockFamily,
   version: string,
   handoffPath: string,
   runtime: Runtime,
+  options: PrepareAndGateOptions = {},
 ): Promise<ReleaseHandoff> {
   // A failed retry must not leave an older same-version handoff looking green.
   await runtime.removeFile(handoffPath);
 
   const artifactDirectory = path.join(ARTIFACT_ROOT, version);
   await runtime.makeDirectory(artifactDirectory);
+
+  const only = options.only;
+  if (only) {
+    // Loud at the START: a subset run must never be mistaken for the real thing.
+    console.warn(
+      `[release-family] SUBSET GATE RUN (--only ${only.join(",")}): baseline always runs; composed row ` +
+        `${only.includes("composed") ? "WILL run (explicitly requested)" : "is SKIPPED (pass --only composed to include it)"}. ` +
+        "This run CANNOT produce a publish handoff, under any circumstance.",
+    );
+  }
+
+  let artifacts: CandidateArtifact[] | undefined;
+  let reusedArtifacts = false;
+  let reuseProvenance: BuildProvenanceEntry[] | undefined;
+
+  if (options.reuseArtifacts) {
+    const attempt = await attemptArtifactReuse(family, version, artifactDirectory, runtime);
+    if (attempt.reusable) {
+      artifacts = attempt.artifacts;
+      reusedArtifacts = true;
+      reuseProvenance = attempt.provenance;
+      console.warn(
+        `[release-family] REUSING previously built artifacts for ${version} (--reuse-artifacts): all ` +
+          `${artifacts.length} tarballs re-hashed clean and every package's git HEAD/tree matched its recorded build.`,
+      );
+    } else {
+      console.warn(
+        `[release-family] --reuse-artifacts requested but invalid: ${attempt.reason} Doing a FULL REBUILD.`,
+      );
+    }
+  }
+
+  if (!artifacts) {
+    const built = await buildAndPackAllMembers(family, version, artifactDirectory, runtime);
+    artifacts = built.artifacts;
+    if (built.provenance.length > 0) {
+      await writeProvenance(artifactDirectory, version, built.provenance, runtime);
+    }
+  }
+
+  const gated = await runtime.runLocalGate(
+    {
+      candidateVersion: version,
+      expectedFamilyNames: family.members.map(member => member.name),
+      artifacts,
+      // The generator gate's three adapter paths are read from the
+      // environment exactly once, here, at the outermost entry point, and
+      // threaded through the local-registry gate as plain context data.
+      featureCatalogAdapterPath: process.env.WARLOCK_FEATURE_CATALOG_ADAPTER,
+      generatedOutputOraclePath: process.env.WARLOCK_GENERATED_OUTPUT_ORACLE,
+      browserOracleAdapterPath: process.env.WARLOCK_GENERATED_BROWSER_ORACLE,
+      onlyFeatures: only,
+    },
+    {
+      runZeroEditGeneratorGate: (context: GeneratorGateContext) =>
+        runZeroEditGeneratorGate(context),
+      now: runtime.now,
+    },
+  );
+  const handoff: ReleaseHandoff = {
+    ...gated,
+    artifacts: gated.artifacts.map(artifact => ({ ...artifact })),
+    subjects: family.members.map(member => member.name),
+    ...(reusedArtifacts ? { reusedArtifacts: true, reuseProvenance } : {}),
+  };
+  assertHandoffMatchesArtifacts(handoff, artifacts, version);
+
+  if (only) {
+    // Loud at the END, and enforced HERE: whatever passed above, a subset
+    // run must never reach `writeHandoff` -- it cannot authorise a publish.
+    throw new Error(
+      [
+        `SUBSET GATE RUN COMPLETE (--only ${only.join(",")}): the selected matrix rows passed, but`,
+        "refusing to write a publish handoff -- a subset run can NEVER authorise a publish.",
+        "This was only useful for iterating on the named row(s); run the full gate (no --only) to",
+        "produce a handoff eligible for publish/confirm.",
+      ].join(" "),
+    );
+  }
+
+  await runtime.writeHandoff(handoffPath, handoff);
+  return handoff;
+}
+
+async function buildAndPackAllMembers(
+  family: WarlockFamily,
+  version: string,
+  artifactDirectory: string,
+  runtime: Runtime,
+): Promise<{ artifacts: CandidateArtifact[]; provenance: BuildProvenanceEntry[] }> {
   const artifacts: CandidateArtifact[] = [];
+  const provenance: BuildProvenanceEntry[] = [];
   const dirtyTreeRefusals: string[] = [];
   const qualityRefusals: string[] = [];
 
@@ -241,10 +383,20 @@ async function prepareAndGate(
     const inspection = await runtime.inspectArtifact(tarballPath);
     assertBuiltManifest(inspection.manifest, member.name, version);
     assertArtifactContainsItsEntryPoints(inspection.manifest, inspection.entries, member.name);
-    artifacts.push({
+    const sha256 = await runtime.sha256File(tarballPath);
+    artifacts.push({ name: member.name, tarballPath, sha256 });
+
+    // Provenance is recorded for EVERY build, whether or not this run used
+    // --reuse-artifacts: it is what lets a LATER run reuse these tarballs.
+    const gitHead = await getGitHead(member, runtime);
+    provenance.push({
       name: member.name,
+      version,
       tarballPath,
-      sha256: await runtime.sha256File(tarballPath),
+      sha256,
+      gitHead,
+      gitDirtyEntries: [...cleanliness.dirtyInSurface, ...cleanliness.waivedOutsideSurface],
+      builtAt: runtime.now().toISOString(),
     });
   }
 
@@ -255,32 +407,178 @@ async function prepareAndGate(
     throw new Error([...dirtyTreeRefusals, ...qualityRefusals].join("\n\n"));
   }
 
-  const gated = await runtime.runLocalGate(
-    {
-      candidateVersion: version,
-      expectedFamilyNames: family.members.map(member => member.name),
-      artifacts,
-      // The generator gate's three adapter paths are read from the
-      // environment exactly once, here, at the outermost entry point, and
-      // threaded through the local-registry gate as plain context data.
-      featureCatalogAdapterPath: process.env.WARLOCK_FEATURE_CATALOG_ADAPTER,
-      generatedOutputOraclePath: process.env.WARLOCK_GENERATED_OUTPUT_ORACLE,
-      browserOracleAdapterPath: process.env.WARLOCK_GENERATED_BROWSER_ORACLE,
-    },
-    {
-      runZeroEditGeneratorGate: (context: GeneratorGateContext) =>
-        runZeroEditGeneratorGate(context),
-      now: runtime.now,
-    },
-  );
-  const handoff: ReleaseHandoff = {
-    ...gated,
-    artifacts: gated.artifacts.map(artifact => ({ ...artifact })),
-    subjects: family.members.map(member => member.name),
+  return { artifacts, provenance };
+}
+
+function provenancePath(artifactDirectory: string): string {
+  return path.join(artifactDirectory, "build-provenance.json");
+}
+
+async function readProvenance(
+  artifactDirectory: string,
+  version: string,
+  runtime: Runtime,
+): Promise<BuildProvenance | undefined> {
+  let source: string;
+  try {
+    source = await runtime.readTextFile(provenancePath(artifactDirectory));
+  } catch {
+    return undefined;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(source);
+  } catch {
+    return undefined;
+  }
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Partial<BuildProvenance>;
+  if (record.schemaVersion !== 1 || record.version !== version || !Array.isArray(record.members)) {
+    return undefined;
+  }
+  return record as BuildProvenance;
+}
+
+async function writeProvenance(
+  artifactDirectory: string,
+  version: string,
+  members: readonly BuildProvenanceEntry[],
+  runtime: Runtime,
+): Promise<void> {
+  const provenance: BuildProvenance = {
+    schemaVersion: 1,
+    family: WARLOCK_FAMILY_NAME,
+    version,
+    members,
   };
-  assertHandoffMatchesArtifacts(handoff, artifacts, version);
-  await runtime.writeHandoff(handoffPath, handoff);
-  return handoff;
+  await runtime.writeTextFile(provenancePath(artifactDirectory), `${JSON.stringify(provenance, null, 2)}\n`);
+}
+
+interface ArtifactReuseAttempt {
+  reusable: boolean;
+  /** Human-readable, names the offending package -- empty when reusable. */
+  reason: string;
+  artifacts: CandidateArtifact[];
+  provenance: BuildProvenanceEntry[];
+}
+
+/**
+ * Prove (never merely assume) that every family member's previously built
+ * tarball for THIS version is still exactly what it was when it was built:
+ * the recorded artifact exists, its tarball still exists and re-hashes to the
+ * recorded SHA-256, and the package's git HEAD and full working-tree status
+ * are byte-for-byte identical to what was captured at build time.
+ *
+ * Any single failure invalidates reuse for the WHOLE run -- never a silent
+ * half-reuse of some members and a rebuild of others.
+ */
+export async function attemptArtifactReuse(
+  family: WarlockFamily,
+  version: string,
+  artifactDirectory: string,
+  runtime: Runtime,
+): Promise<ArtifactReuseAttempt> {
+  const provenance = await readProvenance(artifactDirectory, version, runtime);
+  if (!provenance) {
+    return {
+      reusable: false,
+      reason: `no recorded build-provenance.json for version ${version} in ${artifactDirectory}.`,
+      artifacts: [],
+      provenance: [],
+    };
+  }
+
+  const byName = new Map(provenance.members.map(entry => [entry.name, entry]));
+  const artifacts: CandidateArtifact[] = [];
+  const kept: BuildProvenanceEntry[] = [];
+
+  for (const member of family.members) {
+    const entry = byName.get(member.name);
+    if (!entry || entry.version !== version) {
+      return {
+        reusable: false,
+        reason: `no recorded artifact for ${member.name} at version ${version}.`,
+        artifacts: [],
+        provenance: [],
+      };
+    }
+    if (!(await runtime.fileExists(entry.tarballPath))) {
+      return {
+        reusable: false,
+        reason: `recorded tarball for ${member.name} no longer exists at ${entry.tarballPath}.`,
+        artifacts: [],
+        provenance: [],
+      };
+    }
+
+    const actualHash = (await runtime.sha256File(entry.tarballPath)).toLowerCase();
+    if (actualHash !== entry.sha256.toLowerCase()) {
+      return {
+        reusable: false,
+        reason:
+          `recorded tarball for ${member.name} re-hashed to ${actualHash}, expected ${entry.sha256}.`,
+        artifacts: [],
+        provenance: [],
+      };
+    }
+
+    const currentHead = await getGitHead(member, runtime);
+    if (currentHead !== entry.gitHead.toLowerCase()) {
+      return {
+        reusable: false,
+        reason: `git HEAD for ${member.name} moved (recorded ${entry.gitHead}, now ${currentHead}).`,
+        artifacts: [],
+        provenance: [],
+      };
+    }
+
+    const currentDirtyEntries = await getRawGitStatus(member, runtime);
+    if (!sameDirtyEntries(currentDirtyEntries, entry.gitDirtyEntries)) {
+      return {
+        reusable: false,
+        reason: `git working tree for ${member.name} changed since its recorded build.`,
+        artifacts: [],
+        provenance: [],
+      };
+    }
+
+    artifacts.push({ name: entry.name, tarballPath: entry.tarballPath, sha256: entry.sha256 });
+    kept.push(entry);
+  }
+
+  return { reusable: true, reason: "", artifacts, provenance: kept };
+}
+
+async function getGitHead(member: WarlockFamilyMember, runtime: Runtime): Promise<string> {
+  const result = await runtime.runCommand({
+    command: "git",
+    args: ["rev-parse", "HEAD"],
+    cwd: member.root,
+    env: { ...process.env },
+  });
+  const head = result.stdout.trim().toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(head)) {
+    throw new Error(`Cannot resolve git HEAD for ${member.name}: unexpected output "${result.stdout.trim()}".`);
+  }
+  return head;
+}
+
+async function getRawGitStatus(member: WarlockFamilyMember, runtime: Runtime): Promise<DirtyPathEntry[]> {
+  const result = await runtime.runCommand({
+    command: "git",
+    args: ["status", "--porcelain=v1", "--untracked-files=all"],
+    cwd: member.root,
+    env: { ...process.env },
+  });
+  return parseGitPorcelain(result.stdout);
+}
+
+function sameDirtyEntries(left: readonly DirtyPathEntry[], right: readonly DirtyPathEntry[]): boolean {
+  if (left.length !== right.length) return false;
+  const key = (entry: DirtyPathEntry) => `${entry.status} ${entry.path}`;
+  const sortedLeft = left.map(key).sort();
+  const sortedRight = right.map(key).sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
 }
 
 export interface DirtyPathEntry {
@@ -1063,6 +1361,7 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
     removeDirectory:
       dependencies.removeDirectory ?? (directory => rm(directory, { recursive: true, force: true })),
     removeFile: dependencies.removeFile ?? removeFileIfPresent,
+    fileExists: dependencies.fileExists ?? (async filePath => existsSync(filePath)),
     writeHandoff: dependencies.writeHandoff ?? writeHandoffAtomically,
     sha256File: dependencies.sha256File ?? defaultSha256File,
     resolvePkgistCli: dependencies.resolvePkgistCli ?? resolvePkgistCli,
@@ -1268,16 +1567,38 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     : "gate";
   let version = "";
   let handoffPath: string | undefined;
+  let reuseArtifacts = false;
+  let only: readonly string[] | undefined;
   for (let index = 0; index < values.length; index += 1) {
     const argument = values[index];
     if (argument === "--version") version = values[++index] ?? "";
     else if (argument.startsWith("--version=")) version = argument.slice("--version=".length);
     else if (argument === "--handoff") handoffPath = values[++index];
     else if (argument.startsWith("--handoff=")) handoffPath = argument.slice("--handoff=".length);
+    else if (argument === "--reuse-artifacts") reuseArtifacts = true;
+    else if (argument === "--only") only = parseOnlyArgument(values[++index]);
+    else if (argument.startsWith("--only=")) only = parseOnlyArgument(argument.slice("--only=".length));
     else throw new Error(`Unknown release-family argument: ${argument}.`);
   }
   assertExactVersion(version);
-  return { mode, version, handoffPath };
+  return {
+    mode,
+    version,
+    handoffPath,
+    reuseArtifacts: reuseArtifacts || undefined,
+    only,
+  };
+}
+
+function parseOnlyArgument(raw: string | undefined): string[] {
+  const names = (raw ?? "")
+    .split(",")
+    .map(name => name.trim())
+    .filter(name => name.length > 0);
+  if (names.length === 0) {
+    throw new Error("--only requires at least one feature name (comma-separated).");
+  }
+  return names;
 }
 
 async function main(): Promise<void> {

@@ -55,6 +55,19 @@ export interface GeneratorGateContext {
    * so pointing at it directly is intentionally rejected by its certificate.
    */
   browserOracleAdapterPath?: string;
+  /**
+   * Opt-in subset selection (`--only` on the release-family CLI). When
+   * omitted, the full matrix runs exactly as it always has: baseline, every
+   * catalog feature in isolation, then the composed row.
+   *
+   * When present: the baseline row still always runs (it is the diff basis
+   * for every other row); only the named features get isolated rows; the
+   * composed row is skipped unless this list explicitly contains
+   * `"composed"`. Every non-"composed" name must exist in the catalog the
+   * feature adapter returns -- an unknown name is a hard error naming it,
+   * never a silent no-op.
+   */
+  onlyFeatures?: readonly string[];
 }
 
 export interface GateCommandRequest {
@@ -178,18 +191,93 @@ export async function runZeroEditGeneratorGate(
   const catalog = parseFeatureCatalog(catalogResult.stdout, await runtime.realPath(coreRoot));
   runtime.onEvent("subjects-derived", catalog.features.join(","));
 
+  const selection = resolveFeatureSelection(catalog.features, context.onlyFeatures);
+  if (selection.isSubset) {
+    console.warn(
+      `[zero-edit-generator-gate] SUBSET RUN (--only): isolated rows = ` +
+        `${selection.isolatedFeatures.length > 0 ? selection.isolatedFeatures.join(", ") : "(none)"}; ` +
+        `composed row = ${selection.runComposed ? "RUNS" : "SKIPPED"}; skipped feature rows = ` +
+        `${selection.skippedFeatures.length > 0 ? selection.skippedFeatures.join(", ") : "(none)"}. ` +
+        "This is NOT a full matrix run.",
+    );
+  }
+
   await exerciseCase(runtime, context, config, baseline, baseline, []);
-  for (const feature of catalog.features) {
+  for (const feature of selection.isolatedFeatures) {
     const app = await scaffold(runtime, context, createCli, casesRoot, `feature-${safeName(feature)}`);
     await addFeatures(runtime, context, app, [feature]);
     await assertGeneratedAndInstalled(runtime, context, config.npmCliPath, app);
     await exerciseCase(runtime, context, config, app, baseline, [feature]);
   }
 
-  const composed = await scaffold(runtime, context, createCli, casesRoot, "composed");
-  await addFeatures(runtime, context, composed, catalog.features);
-  await assertGeneratedAndInstalled(runtime, context, config.npmCliPath, composed);
-  await exerciseCase(runtime, context, config, composed, baseline, catalog.features);
+  if (selection.runComposed) {
+    const composed = await scaffold(runtime, context, createCli, casesRoot, "composed");
+    await addFeatures(runtime, context, composed, catalog.features);
+    await assertGeneratedAndInstalled(runtime, context, config.npmCliPath, composed);
+    await exerciseCase(runtime, context, config, composed, baseline, catalog.features);
+  }
+
+  if (selection.isSubset) {
+    console.warn(
+      `[zero-edit-generator-gate] SUBSET RUN COMPLETE (--only): rows executed = baseline` +
+        `${selection.isolatedFeatures.length > 0 ? `, ${selection.isolatedFeatures.join(", ")}` : ""}` +
+        `${selection.runComposed ? ", composed" : ""}. Skipped rows: ` +
+        `${selection.skippedFeatures.length > 0 ? selection.skippedFeatures.join(", ") : "(none)"}` +
+        `${selection.runComposed ? "" : ", composed"}.`,
+    );
+  }
+}
+
+const COMPOSED_ROW_KEYWORD = "composed";
+
+export interface FeatureSelection {
+  /** True whenever `onlyFeatures` was supplied at all -- this is not a full run. */
+  isSubset: boolean;
+  /** Catalog features (in catalog order) that get their own isolated row. */
+  isolatedFeatures: readonly string[];
+  /** Whether the composed row (every catalog feature added together) runs. */
+  runComposed: boolean;
+  /** Catalog features that get NO isolated row this run, for the loud report. */
+  skippedFeatures: readonly string[];
+}
+
+/**
+ * Resolve which rows this run actually exercises.
+ *
+ * With no `only` list this is the untouched full-matrix behaviour: every
+ * catalog feature in isolation, plus the composed row. With an `only` list,
+ * ONLY the named catalog features get isolated rows, and the composed row
+ * runs only when `only` explicitly names `"composed"`. An unknown, non-
+ * "composed" name is a hard error naming it -- never a silent no-op.
+ */
+export function resolveFeatureSelection(
+  catalogFeatures: readonly string[],
+  only: readonly string[] | undefined,
+): FeatureSelection {
+  if (!only) {
+    return { isSubset: false, isolatedFeatures: catalogFeatures, runComposed: true, skippedFeatures: [] };
+  }
+  if (only.length === 0) {
+    throw new Error("--only requires at least one feature name.");
+  }
+
+  const catalogSet = new Set(catalogFeatures);
+  const requestedFeatures = only.filter(name => name !== COMPOSED_ROW_KEYWORD);
+  const unknown = requestedFeatures.filter(name => !catalogSet.has(name));
+  if (unknown.length > 0) {
+    throw new Error(
+      `--only names unknown feature(s): ${unknown.join(", ")}. Valid features are: ` +
+        `${catalogFeatures.join(", ")} (pass "composed" separately to also run the composed row).`,
+    );
+  }
+
+  const requestedSet = new Set(requestedFeatures);
+  return {
+    isSubset: true,
+    isolatedFeatures: catalogFeatures.filter(feature => requestedSet.has(feature)),
+    runComposed: only.includes(COMPOSED_ROW_KEYWORD),
+    skippedFeatures: catalogFeatures.filter(feature => !requestedSet.has(feature)),
+  };
 }
 
 async function scaffold(

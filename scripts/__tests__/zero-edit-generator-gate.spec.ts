@@ -312,6 +312,55 @@ describe("zero-edit generator matrix", () => {
     );
   });
 
+  it("--only web runs baseline + web and neither the other feature nor the composed row", async () => {
+    const fixture = await harness(["alpha", "web"]);
+    await runZeroEditGeneratorGate(
+      { ...fixture.context, onlyFeatures: ["web"] },
+      fixture.dependencies,
+    );
+
+    const creates = fixture.events
+      .filter(([event]) => event === "scaffold-created")
+      .map(([, name]) => name);
+    assert.deepEqual(creates, ["baseline", "feature-web"]);
+    assert.deepEqual(
+      fixture.events.filter(
+        ([event]) => event === "isolated-feature-added" || event === "composed-features-added",
+      ),
+      [["isolated-feature-added", "web"]],
+    );
+  });
+
+  it("--only <unknown feature> is a hard error naming the unknown feature, never a silent no-op", async () => {
+    const fixture = await harness(["alpha", "web"]);
+    await assert.rejects(
+      runZeroEditGeneratorGate(
+        { ...fixture.context, onlyFeatures: ["bogus"] },
+        fixture.dependencies,
+      ),
+      error => {
+        const message = (error as Error).message;
+        assert.match(message, /unknown feature\(s\): bogus/);
+        assert.match(message, /alpha/);
+        assert.match(message, /web/);
+        return true;
+      },
+    );
+
+    // Fails as soon as the catalog is known and the request is checked
+    // against it -- before any matrix row (isolated or composed) runs. The
+    // baseline app is scaffolded earlier (it is needed to fetch the catalog
+    // in the first place), but its own exercise-case never happens.
+    const creates = fixture.events
+      .filter(([event]) => event === "scaffold-created")
+      .map(([, name]) => name);
+    assert.deepEqual(creates, ["baseline"]);
+    assert.equal(
+      fixture.events.some(([event]) => event === "generated-output-proved"),
+      false,
+    );
+  });
+
   it("rejects non-exact generated pins and more than one physical Core", async () => {
     const badPin = await harness(["alpha"], { badPin: true });
     await assert.rejects(

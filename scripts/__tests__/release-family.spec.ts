@@ -77,6 +77,9 @@ function fixture(
     }),
     runCommand: async request => {
       commands.push(request);
+      if (request.command === "git" && request.args[0] === "rev-parse") {
+        return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      }
       if (request.args[1] === "pack") {
         const sourceDirectory = request.args[2];
         const packageName = sourceDirectory.includes("create-warlock")
@@ -731,6 +734,195 @@ describe("runReleaseFamily publish mode", () => {
       "hash:artifact-1.tgz",
       "publish:artifact-1.tgz",
     ]);
+  });
+});
+
+describe("--reuse-artifacts", () => {
+  const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications"
+  const createWarlockRoot = FAMILY.members[1].root; // "create-warlock"
+  const RECORDED_HEAD_NOTIF = "1".repeat(40);
+  const RECORDED_HEAD_CW = "2".repeat(40);
+  const RECORDED_TARBALL_NOTIF = path.resolve("release-artifacts-fixture", "notifications.tgz");
+  const RECORDED_TARBALL_CW = path.resolve("release-artifacts-fixture", "create-warlock.tgz");
+
+  function reuseFixture(
+    options: {
+      headsByRoot?: ReadonlyMap<string, string>;
+      dirtyByRoot?: ReadonlyMap<string, string>;
+      hashOverridesByPath?: ReadonlyMap<string, string>;
+    } = {},
+  ): ReturnType<typeof fixture> {
+    const control = fixture();
+    const provenanceMembers = [
+      {
+        name: "@warlock.js/notifications",
+        version: VERSION,
+        tarballPath: RECORDED_TARBALL_NOTIF,
+        sha256: HASH,
+        gitHead: RECORDED_HEAD_NOTIF,
+        gitDirtyEntries: [],
+        builtAt: "2026-09-01T00:00:00.000Z",
+      },
+      {
+        name: "create-warlock",
+        version: VERSION,
+        tarballPath: RECORDED_TARBALL_CW,
+        sha256: HASH,
+        gitHead: RECORDED_HEAD_CW,
+        gitDirtyEntries: [],
+        builtAt: "2026-09-01T00:00:00.000Z",
+      },
+    ];
+
+    const baseReadTextFile = control.dependencies.readTextFile!;
+    control.dependencies.readTextFile = async filePath => {
+      if (path.basename(filePath) === "build-provenance.json") {
+        return JSON.stringify({
+          schemaVersion: 1,
+          family: "warlock",
+          version: VERSION,
+          members: provenanceMembers,
+        });
+      }
+      return await baseReadTextFile(filePath);
+    };
+
+    control.dependencies.fileExists = async () => true;
+
+    const baseRunCommand = control.dependencies.runCommand!;
+    control.dependencies.runCommand = async request => {
+      if (request.command === "git" && request.args[0] === "rev-parse") {
+        control.commands.push(request);
+        const recorded = request.cwd === notificationsRoot ? RECORDED_HEAD_NOTIF : RECORDED_HEAD_CW;
+        const head = options.headsByRoot?.get(request.cwd) ?? recorded;
+        return { stdout: `${head}\n`, stderr: "" };
+      }
+      if (request.command === "git" && request.args[0] === "status") {
+        control.commands.push(request);
+        return { stdout: options.dirtyByRoot?.get(request.cwd) ?? "", stderr: "" };
+      }
+      return await baseRunCommand(request);
+    };
+
+    const baseSha256File = control.dependencies.sha256File!;
+    control.dependencies.sha256File = async filePath => {
+      const override = options.hashOverridesByPath?.get(filePath);
+      return override ?? (await baseSha256File(filePath));
+    };
+
+    return control;
+  }
+
+  it("REFUSES reuse when a tarball's re-hash does not match the record, and does a FULL rebuild instead", async () => {
+    const control = reuseFixture({
+      hashOverridesByPath: new Map([[RECORDED_TARBALL_NOTIF, "b".repeat(64)]]),
+    });
+
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      control.dependencies,
+    );
+
+    assert.ok(handoff);
+    assert.notEqual(handoff.reusedArtifacts, true);
+    const builds = control.commands.filter(command => command.args[1] === "build");
+    assert.equal(builds.length, FAMILY.members.length, "a hash mismatch must trigger rebuilding EVERY member, never a partial reuse");
+    assert.equal(control.handoffs.length, 1);
+  });
+
+  it("REFUSES reuse when a package's git HEAD moved since the recorded build, and does a FULL rebuild instead", async () => {
+    const control = reuseFixture({
+      headsByRoot: new Map([[notificationsRoot, "f".repeat(40)]]),
+    });
+
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      control.dependencies,
+    );
+
+    assert.ok(handoff);
+    assert.notEqual(handoff.reusedArtifacts, true);
+    const builds = control.commands.filter(command => command.args[1] === "build");
+    assert.equal(builds.length, FAMILY.members.length, "a moved HEAD must trigger rebuilding EVERY member, never a partial reuse");
+  });
+
+  it("REFUSES reuse when a package's working tree changed since the recorded build, and does a FULL rebuild instead", async () => {
+    // Outside the published surface (so a FRESH build of this member is not
+    // itself blocked by the ordinary dirty-tree gate) -- proving reuse
+    // validity is a STRICTER, whole-tree check than "safe to publish".
+    const control = reuseFixture({
+      dirtyByRoot: new Map([[createWarlockRoot, "?? tests/fixtures/new-fixture.ts\n"]]),
+    });
+
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      control.dependencies,
+    );
+
+    assert.ok(handoff);
+    assert.notEqual(handoff.reusedArtifacts, true);
+    const builds = control.commands.filter(command => command.args[1] === "build");
+    assert.equal(builds.length, FAMILY.members.length, "an unrecorded working-tree change must trigger rebuilding EVERY member");
+  });
+
+  it("ACCEPTS reuse when every tarball re-hashes clean and every package's HEAD/tree match the recorded build -- and the handoff records the reuse", async () => {
+    const control = reuseFixture();
+
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      control.dependencies,
+    );
+
+    assert.ok(handoff);
+    assert.equal(handoff.reusedArtifacts, true);
+    assert.ok(handoff.reuseProvenance);
+    assert.equal(handoff.reuseProvenance!.length, FAMILY.members.length);
+    assert.deepEqual(
+      handoff.artifacts.map(artifact => artifact.tarballPath),
+      [RECORDED_TARBALL_NOTIF, RECORDED_TARBALL_CW],
+    );
+    const builds = control.commands.filter(command => command.args[1] === "build");
+    assert.equal(builds.length, 0, "a fully valid reuse must never rebuild any member");
+    assert.equal(control.handoffs.length, 1);
+    assert.equal(control.handoffs[0]?.reusedArtifacts, true);
+  });
+});
+
+describe("--only (subset gate run)", () => {
+  it(
+    "NEVER emits a publish handoff for a subset run, even when every selected row passes -- " +
+      "this is the guarantee that keeps --only from ever becoming how a release actually ships",
+    async () => {
+      const control = fixture();
+      await assert.rejects(
+        runReleaseFamily(
+          { mode: "gate", version: VERSION, only: ["create-warlock"] },
+          control.dependencies,
+        ),
+        /NEVER authorise a publish/,
+      );
+      assert.equal(control.handoffs.length, 0, "a subset run must never write a publish handoff");
+    },
+  );
+
+  it("threads --only through to the local gate as onlyFeatures, unexamined", async () => {
+    const control = fixture();
+    let seenOnly: readonly string[] | undefined;
+    control.dependencies.runLocalGate = async input => {
+      seenOnly = input.onlyFeatures;
+      return {
+        kind: "warlock-family-publish-handoff",
+        candidateVersion: input.candidateVersion,
+        artifacts: input.artifacts.map(artifact => ({ ...artifact })),
+        verifiedAt: "2026-09-02T12:00:00.000Z",
+      };
+    };
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, only: ["web"] }, control.dependencies),
+    );
+    assert.deepEqual(seenOnly, ["web"]);
+    assert.equal(control.handoffs.length, 0);
   });
 });
 

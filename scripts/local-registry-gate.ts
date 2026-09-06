@@ -74,6 +74,12 @@ export interface LocalRegistryGateInput {
   featureCatalogAdapterPath: string | undefined;
   generatedOutputOraclePath: string | undefined;
   browserOracleAdapterPath: string | undefined;
+  /**
+   * Opt-in subset selection, threaded straight through to the generator gate
+   * unexamined -- this module has no opinion on feature names. Absent for a
+   * normal full-matrix run.
+   */
+  onlyFeatures?: readonly string[];
 }
 
 export interface PublishHandoff {
@@ -216,6 +222,7 @@ function snapshotCandidate(input: LocalRegistryGateInput): Readonly<LocalRegistr
     featureCatalogAdapterPath: input.featureCatalogAdapterPath,
     generatedOutputOraclePath: input.generatedOutputOraclePath,
     browserOracleAdapterPath: input.browserOracleAdapterPath,
+    onlyFeatures: input.onlyFeatures ? Object.freeze([...input.onlyFeatures]) : undefined,
   });
 }
 
@@ -751,6 +758,7 @@ export async function runLocalRegistryPreGate(
       featureCatalogAdapterPath: candidate.featureCatalogAdapterPath,
       generatedOutputOraclePath: candidate.generatedOutputOraclePath,
       browserOracleAdapterPath: candidate.browserOracleAdapterPath,
+      onlyFeatures: candidate.onlyFeatures,
     });
     event("generator-gate-passed");
     gatePassed = true;
