@@ -380,7 +380,14 @@ async function routesJson(root) {
     if (!Array.isArray(rows)) throw new Error("expected a JSON array");
     return rows;
   } catch (error) {
-    throw new Error(`\`warlock routes --json\` in ${root} did not print a JSON array: ${String(error)}`);
+    // Quote what the seam actually printed. When this first fired, the cause
+    // was the CLI's own success banner sharing stdout with the payload — and
+    // the parser error alone ("unexpected non-whitespace character") named
+    // neither the contaminant nor the command that emitted it.
+    throw new Error(
+      `\`warlock routes --json\` in ${root} did not print a JSON array: ${String(error)}\n` +
+        `--- raw stdout (${stdout.length} chars) ---\n${stdout.slice(0, 2000)}\n--- end raw stdout ---`,
+    );
   }
 }
 
