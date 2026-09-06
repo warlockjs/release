@@ -257,6 +257,41 @@ function countPrecedingButtons(source, offset) {
 }
 
 /**
+ * Locate the counter button WITHOUT requiring the increment to still be intact.
+ *
+ * Under `--mutation-control` the gate has already rewritten
+ * `setCount((c) => c + 1)` to `setCount((c) => c)`, so
+ * {@link findIncrementMutationCandidate} — which matches the `+ 1` — finds
+ * nothing. That is the correct behaviour for NOMINATING a mutation and the
+ * wrong behaviour for DRIVING one: the button is still on the page, only its
+ * handler was neutered.
+ *
+ * Requiring the full increment idiom in control mode made the oracle throw
+ * `NO_INCREMENT_BUTTON_FOUND` and exit non-zero WITHOUT the marker, before it
+ * ever opened a browser — so the gate reported "browser oracle did not fail on
+ * the mutation control" when the truth was that the control had never run. Two
+ * full gate runs died there, and the message named the wrong thing both times.
+ *
+ * @param source The page source, mutated or not.
+ * @returns Zero-based index of the counter button among the page's `<button>`
+ *          elements, or undefined when no `useState` setter is invoked at all.
+ */
+export function findCounterButtonIndex(source) {
+  const setters = [...source.matchAll(/const\s*\[\s*\w+\s*,\s*(set[A-Z]\w*)\s*\]\s*=\s*useState\b/g)].map(
+    match => match[1],
+  );
+
+  for (const setter of setters) {
+    const invocation = new RegExp(`${setter}\\(`).exec(source);
+    if (!invocation) continue;
+
+    return countPrecedingButtons(source, invocation.index ?? 0);
+  }
+
+  return undefined;
+}
+
+/**
  * Extract the counter's rendered numeric value from a text snippet that is
  * the increment button's container text with the button's OWN label removed
  * (see the `readCounterContainerText` expression in `driveBrowserPhase`).
@@ -894,23 +929,41 @@ export async function main(argv) {
 
   const source = await readFile(homePage.absolutePath, "utf8");
   const mutationCandidate = findIncrementMutationCandidate(source);
-  if (!mutationCandidate) {
+
+  // Under --mutation-control the gate has ALREADY neutered the increment, so
+  // the full idiom is legitimately absent and its absence is the point. Demand
+  // it only when nominating a mutation; to DRIVE one, all that is needed is the
+  // button, which is still there. See findCounterButtonIndex.
+  if (!mutationCandidate && !options.mutationControl) {
     throw new Error(
       `NO_INCREMENT_BUTTON_FOUND: ${homePage.absolutePath} has no "useState" counter idiom ` +
         '(a setter invoked as "setX(y => y + 1)") this adapter can honestly click-test and nominate as a mutation control.',
     );
   }
 
+  const buttonIndex = mutationCandidate?.buttonIndex ?? findCounterButtonIndex(source);
+
+  if (buttonIndex === undefined) {
+    throw new Error(
+      `NO_COUNTER_BUTTON_FOUND: ${homePage.absolutePath} invokes no "useState" setter at all, so there is ` +
+        "no counter button to click — under --mutation-control this means the mutated page lost more than " +
+        "the increment, which is a broken mutation, not a detected one.",
+    );
+  }
+
   const chromeExecutable = resolveBrowserExecutable();
-  const homePageForDriving = { absolutePath: homePage.absolutePath, buttonIndex: mutationCandidate.buttonIndex };
+  const homePageForDriving = { absolutePath: homePage.absolutePath, buttonIndex };
 
   const development = await runDevelopmentPhase({ appRoot, homePage: homePageForDriving, chromeExecutable });
   const production = await runProductionPhase({ appRoot, homePage: homePageForDriving, chromeExecutable });
 
+  // In control mode the candidate is absent by design (the gate already applied
+  // it); these values only reach the diagnostic message there, never a
+  // certificate — `decideOutcome` cannot return ok when mutationControl is set.
   const mutation = {
     relativePath: path.join("src", "web", homePage.relativeToWebRoot),
-    find: mutationCandidate.find,
-    replacement: mutationCandidate.replacement,
+    find: mutationCandidate?.find ?? "<already applied by the gate>",
+    replacement: mutationCandidate?.replacement ?? "<already applied by the gate>",
   };
 
   const outcome = decideOutcome({ mutationControl: options.mutationControl, development, production, mutation });

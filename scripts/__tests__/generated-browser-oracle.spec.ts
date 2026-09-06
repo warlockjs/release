@@ -38,6 +38,7 @@ import {
   extractCounterValue,
   extractDeclaredRoutePath,
   findHomePage,
+  findCounterButtonIndex,
   findIncrementMutationCandidate,
   phaseFullyPassed,
   resolvePageRoutePath,
@@ -428,5 +429,44 @@ describe("phaseFullyPassed / decideOutcome", () => {
     assert.equal(outcome.ok, false);
     assert.ok(outcome.message.includes("ZERO_EDIT_BROWSER_ORACLE_ASSERTION_FAILED"));
     assert.ok(/correctly detected/.test(outcome.message));
+  });
+});
+
+describe("findCounterButtonIndex — the control must survive its own mutation", () => {
+  const mutated = `
+    import { useState } from "react";
+    export default function Home() {
+      const [count, setCount] = useState(0);
+      return (
+        <div>
+          <button onClick={() => toggle()}>lang</button>
+          <button onClick={() => setCount((c) => c)}>count is {count}</button>
+        </div>
+      );
+    }
+  `;
+
+  it("finds the counter button in ALREADY-MUTATED source, where the increment idiom is gone", () => {
+    // Two full gate runs died here. Under --mutation-control the gate has
+    // already rewritten setCount((c) => c + 1) to setCount((c) => c), so the
+    // increment finder legitimately matches nothing — and the oracle used to
+    // throw NO_INCREMENT_BUTTON_FOUND and exit WITHOUT the marker before it
+    // ever opened a browser. The gate then reported "did not fail on the
+    // mutation control", which was true and completely misleading: the control
+    // had never run.
+    assert.equal(findIncrementMutationCandidate(mutated), undefined);
+    assert.equal(findCounterButtonIndex(mutated), 1);
+  });
+
+  it("agrees with the increment finder on UNMUTATED source, so the same button is driven either way", () => {
+    const intact = mutated.replace("setCount((c) => c)", "setCount((c) => c + 1)");
+    const candidate = findIncrementMutationCandidate(intact);
+
+    assert.ok(candidate);
+    assert.equal(findCounterButtonIndex(intact), candidate?.buttonIndex);
+  });
+
+  it("returns undefined when the page invokes no useState setter at all", () => {
+    assert.equal(findCounterButtonIndex("export default function P(){ return null; }"), undefined);
   });
 });
