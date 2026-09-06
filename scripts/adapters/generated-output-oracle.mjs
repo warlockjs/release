@@ -490,7 +490,11 @@ async function waitForServerReady(baseUrl, child, timeoutMs) {
     try {
       const response = await fetchWithTimeout(`${baseUrl}/`, {}, REQUEST_TIMEOUT_MS);
       if (response.status < 500) return true;
-      lastError = new Error(`HTTP ${response.status}`);
+      // Quote the body. A bare "HTTP 500" names neither the failing module nor
+      // the reason, and the whole point of this oracle is to stop a generated
+      // app failing without saying why.
+      const body = await response.text().catch(() => "<body unreadable>");
+      lastError = new Error(`HTTP ${response.status}; body:\n${body.slice(0, 4000)}`);
     } catch (error) {
       lastError = error;
     }
@@ -559,10 +563,15 @@ async function exercisePhase({ appRoot, introducedRouteRows }) {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
+  // BOTH streams. The dev/production server's boot narration and most framework
+  // logging go to stdout, so capturing stderr alone reported a failed boot with
+  // the cause missing — the same silence this gate exists to remove.
   let stderrTail = "";
-  child.stderr?.on("data", chunk => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
-  });
+  const captureOutput = chunk => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-8000);
+  };
+  child.stdout?.on("data", captureOutput);
+  child.stderr?.on("data", captureOutput);
 
   let booted = true;
   let ready = false;
@@ -608,10 +617,15 @@ async function exerciseProductionPhase({ appRoot, introducedRouteRows }) {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
   });
+  // BOTH streams. The dev/production server's boot narration and most framework
+  // logging go to stdout, so capturing stderr alone reported a failed boot with
+  // the cause missing — the same silence this gate exists to remove.
   let stderrTail = "";
-  child.stderr?.on("data", chunk => {
-    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
-  });
+  const captureOutput = chunk => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-8000);
+  };
+  child.stdout?.on("data", captureOutput);
+  child.stderr?.on("data", captureOutput);
 
   let booted = true;
   let ready = false;
