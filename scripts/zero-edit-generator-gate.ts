@@ -330,11 +330,10 @@ function assertContext(context: GeneratorGateContext, runtime: Runtime): Require
     throw new Error("Generator npm environment registry does not match its explicit registry URL.");
   }
   const required = (value: string | undefined, envName: string): string => {
-    const resolved = value ?? process.env[envName];
-    if (!resolved || !path.isAbsolute(resolved)) {
+    if (!value || !path.isAbsolute(value)) {
       throw new Error(`${envName} must name an absolute required adapter; this gate never skips or substitutes a fixture.`);
     }
-    return path.resolve(resolved);
+    return path.resolve(value);
   };
   const npmCliPath = context.npmCliPath ?? runtime.resolveNpmCliPath();
   if (!path.isAbsolute(npmCliPath) || path.basename(npmCliPath) !== "npm-cli.js") {

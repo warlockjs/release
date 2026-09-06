@@ -9,17 +9,20 @@ import {
   runLocalRegistryPreGate,
   type CommandRequest,
   type GateEvent,
-  type GeneratorGateContext,
   type LocalRegistryGateDependencies,
   type LocalRegistryGateInput,
   type PublishHandoff,
 } from "../local-registry-gate";
+import type { GeneratorGateContext } from "../zero-edit-generator-gate";
 
 const VERSION = "5.3.0";
 const HASH = "a".repeat(64);
 const CHANGED_HASH = "b".repeat(64);
 const WORKSPACE = resolve("gate-work");
 const NPM_CLI = resolve("tools", "npm-cli.js");
+const FEATURE_ADAPTER = resolve("adapters", "features.mjs");
+const OUTPUT_ORACLE = resolve("adapters", "generated-output.mjs");
+const BROWSER_ORACLE = resolve("adapters", "generated-browser.mjs");
 const ARTIFACTS = WARLOCK_FAMILY_PACKAGE_NAMES.map((name, index) => ({
   name,
   tarballPath: resolve("artifacts", `${String(index).padStart(2, "0")}.tgz`),
@@ -29,6 +32,9 @@ const INPUT: LocalRegistryGateInput = {
   candidateVersion: VERSION,
   expectedFamilyNames: WARLOCK_FAMILY_PACKAGE_NAMES,
   artifacts: ARTIFACTS,
+  featureCatalogAdapterPath: FEATURE_ADAPTER,
+  generatedOutputOraclePath: OUTPUT_ORACLE,
+  browserOracleAdapterPath: BROWSER_ORACLE,
 };
 
 function fixture(overrides: Partial<LocalRegistryGateDependencies> = {}) {
@@ -159,6 +165,9 @@ describe("local registry unit sequencing controls (not the real-registry accepta
       }
     }
     assert.ok(generatorContext);
+    assert.equal(generatorContext.featureCatalogAdapterPath, FEATURE_ADAPTER);
+    assert.equal(generatorContext.generatedOutputOraclePath, OUTPUT_ORACLE);
+    assert.equal(generatorContext.browserOracleAdapterPath, BROWSER_ORACLE);
     assert.deepEqual(control.handoffs, [handoff]);
     assert.equal(Object.isFrozen(handoff), true);
     assert.deepEqual(control.count, { stopped: 1, exited: 1, dead: 1, ready: 1, workspaces: 1, hashes: ARTIFACTS.length * 2 });

@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { spawn } from "node:child_process";
 
+import type { GeneratorGateContext } from "./zero-edit-generator-gate.ts";
+
 /** Exact family membership; the release orchestrator owns publish order. */
 export const WARLOCK_FAMILY_PACKAGE_NAMES = Object.freeze([
   "@warlock.js/ai",
@@ -61,14 +63,17 @@ export interface LocalRegistryGateInput {
   /** Exact family set in the caller-owned publish order. */
   expectedFamilyNames: readonly string[];
   artifacts: readonly CandidateArtifact[];
-}
-
-export interface GeneratorGateContext {
-  candidateVersion: string;
-  artifacts: readonly CandidateArtifact[];
-  registryUrl: string;
-  npmEnvironment: Readonly<NodeJS.ProcessEnv>;
-  workspaceDirectory: string;
+  /**
+   * The three required generator-gate adapter paths, read from the
+   * environment exactly once by the outermost entry point
+   * (release-family.ts) and threaded through as plain context data from
+   * here on. The keys are required (their VALUE may be `undefined`, which
+   * the generator gate itself refuses) so that a caller which forgets to
+   * wire one of them fails to compile instead of silently going missing.
+   */
+  featureCatalogAdapterPath: string | undefined;
+  generatedOutputOraclePath: string | undefined;
+  browserOracleAdapterPath: string | undefined;
 }
 
 export interface PublishHandoff {
@@ -208,6 +213,9 @@ function snapshotCandidate(input: LocalRegistryGateInput): Readonly<LocalRegistr
     candidateVersion: input.candidateVersion,
     expectedFamilyNames,
     artifacts,
+    featureCatalogAdapterPath: input.featureCatalogAdapterPath,
+    generatedOutputOraclePath: input.generatedOutputOraclePath,
+    browserOracleAdapterPath: input.browserOracleAdapterPath,
   });
 }
 
@@ -740,6 +748,9 @@ export async function runLocalRegistryPreGate(
       registryUrl,
       npmEnvironment: Object.freeze({ ...env }),
       workspaceDirectory,
+      featureCatalogAdapterPath: candidate.featureCatalogAdapterPath,
+      generatedOutputOraclePath: candidate.generatedOutputOraclePath,
+      browserOracleAdapterPath: candidate.browserOracleAdapterPath,
     });
     event("generator-gate-passed");
     gatePassed = true;

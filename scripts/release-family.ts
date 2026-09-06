@@ -22,7 +22,6 @@ import pkgistConfig from "../pkgist.config.ts";
 import {
   runLocalRegistryPreGate,
   type CandidateArtifact,
-  type GeneratorGateContext,
   type LocalRegistryGateDependencies,
   type LocalRegistryGateInput,
   type PublishHandoff,
@@ -33,7 +32,10 @@ import {
   type WarlockFamily,
   type WarlockFamilyMember,
 } from "./warlock-family.ts";
-import { runZeroEditGeneratorGate } from "./zero-edit-generator-gate.ts";
+import {
+  runZeroEditGeneratorGate,
+  type GeneratorGateContext,
+} from "./zero-edit-generator-gate.ts";
 
 export const NPM_ORIGIN = "https://registry.npmjs.org";
 export const EXACT_VERSION =
@@ -258,6 +260,12 @@ async function prepareAndGate(
       candidateVersion: version,
       expectedFamilyNames: family.members.map(member => member.name),
       artifacts,
+      // The generator gate's three adapter paths are read from the
+      // environment exactly once, here, at the outermost entry point, and
+      // threaded through the local-registry gate as plain context data.
+      featureCatalogAdapterPath: process.env.WARLOCK_FEATURE_CATALOG_ADAPTER,
+      generatedOutputOraclePath: process.env.WARLOCK_GENERATED_OUTPUT_ORACLE,
+      browserOracleAdapterPath: process.env.WARLOCK_GENERATED_BROWSER_ORACLE,
     },
     {
       runZeroEditGeneratorGate: (context: GeneratorGateContext) =>
