@@ -557,6 +557,29 @@ export function defaultResolveNpmCliPath(): string {
   return found;
 }
 
+/**
+ * Ceiling on a single gate child process.
+ *
+ * Generous on purpose: the slowest legitimate child here is an `npm install`
+ * of a freshly generated app on a cold cache, and a build of one. Anything
+ * past this is not slow, it is stuck.
+ */
+const COMMAND_TIMEOUT_MS = 15 * 60_000;
+
+/**
+ * Spawn one gate child and collect its output.
+ *
+ * **Every child gets a deadline.** Without one, a child that finishes its work
+ * and then fails to exit hangs the entire release gate silently and forever —
+ * which is exactly what happened on 2026-09-06: `warlock add react` printed
+ * "completed successfully (13ms)" and then held the process open for 67
+ * minutes with zero CPU, and the gate simply waited. Nothing timed out,
+ * nothing was reported, and the run looked slow rather than stuck.
+ *
+ * On timeout the child's tree is killed and the collected output so far is
+ * returned with a non-zero exit code, so `runRequired` fails the row naming
+ * the command — a hang becomes a diagnosable failure instead of a silence.
+ */
 async function defaultRunCommand(request: GateCommandRequest): Promise<GateCommandResult> {
   return await new Promise((resolve, reject) => {
     const child = spawn(request.command, [...request.args], {
@@ -567,10 +590,44 @@ async function defaultRunCommand(request: GateCommandRequest): Promise<GateComma
     });
     let stdout = "";
     let stderr = "";
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      // The child may own a process tree (npm -> node), so kill the tree on
+      // Windows rather than only the direct child.
+      if (process.platform === "win32" && child.pid !== undefined) {
+        spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+      } else {
+        child.kill("SIGKILL");
+      }
+    }, COMMAND_TIMEOUT_MS);
     child.stdout?.setEncoding("utf8").on("data", chunk => (stdout += chunk));
     child.stderr?.setEncoding("utf8").on("data", chunk => (stderr += chunk));
-    child.once("error", reject);
-    child.once("close", code => resolve({ exitCode: code ?? 1, stdout, stderr }));
+    child.once("error", error => {
+      clearTimeout(deadline);
+      reject(error);
+    });
+    child.once("close", code => {
+      clearTimeout(deadline);
+      if (timedOut) {
+        resolve({
+          // Never 0. A killed child's reported code is platform-dependent, and
+          // a timeout that reported success would be worse than no timeout.
+          exitCode: code === 0 || code === null ? 1 : code,
+          stdout,
+          stderr:
+            `${stderr}\nGATE TIMEOUT: this command produced no exit within ` +
+            `${COMMAND_TIMEOUT_MS / 60_000} minutes and was killed. Its output above is ` +
+            `everything it managed to write; if it says the work completed, the ` +
+            `command finished and then failed to EXIT.`,
+        });
+      } else {
+        resolve({ exitCode: code ?? 1, stdout, stderr });
+      }
+    });
   });
 }
 

@@ -217,12 +217,24 @@ export function findIncrementMutationCandidate(source) {
   );
 
   for (const setter of setters) {
-    const incrementPattern = new RegExp(`${setter}\\(\\s*(\\w+)\\s*=>\\s*\\1\\s*\\+\\s*1\\s*\\)`);
+    // The parameter may or may not be parenthesised. The scaffold's own
+    // .prettierrc sets `arrowParens: "always"`, so the generated source says
+    // `setCount((c) => c + 1)` — but a hand-written page, or one formatted
+    // under a different config, says `setCount(c => c + 1)`. Matching only the
+    // bare form made this finder silently blind to the exact shape `warlock
+    // add web` generates, which would fail the row with NO_INCREMENT_BUTTON_FOUND
+    // and read as "this app has no counter" rather than "this regex is wrong".
+    const incrementPattern = new RegExp(
+      `${setter}\\(\\s*\\(?\\s*(\\w+)\\s*\\)?\\s*=>\\s*\\1\\s*\\+\\s*1\\s*\\)`,
+    );
     const match = source.match(incrementPattern);
     if (!match) continue;
 
+    // Preserve the source's own parenthesisation in the replacement, so the
+    // mutated file stays formatted the way the project formats it.
+    const parameter = match[0].includes(`(${match[1]})`) ? `(${match[1]})` : match[1];
     const find = match[0];
-    const replacement = `${setter}(${match[1]} => ${match[1]})`;
+    const replacement = `${setter}(${parameter} => ${match[1]})`;
     const buttonIndex = countPrecedingButtons(source, match.index ?? 0);
 
     return { find, replacement, buttonIndex };

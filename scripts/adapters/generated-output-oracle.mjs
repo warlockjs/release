@@ -107,7 +107,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -210,7 +210,31 @@ export function diffProjectCommands(appCommandsJson, baselineCommandsJson) {
  */
 export function detectHasWeb(packageJson, entryFilesExist) {
   const hasDependency = Boolean(packageJson?.dependencies?.["@warlock.js/web"]);
-  return hasDependency && entryFilesExist === true;
+
+  // The two signals must AGREE. When they disagree this throws instead of
+  // returning false, and that is the whole point of the function.
+  //
+  // This was a silent skip, and it hid the browser oracle from every run: the
+  // page check looked for `src/web/home.page.tsx`, while `warlock add web`
+  // writes `src/web/index.page.tsx` (`core/src/generations/features/web.feature.ts:127`).
+  // So `hasWeb` came back false for every web-bearing row, the gate's
+  // `if (!certificate.hasWeb) return;` (`zero-edit-generator-gate.ts:262`)
+  // returned early, and the browser assertions never ran — while the row
+  // reported a clean pass.
+  //
+  // That is the identical defect to the one this release found in
+  // `web.feature.ts`: a hardcoded path to a file the generator does not write,
+  // failing silently. A `false` here can now only mean "this app has no web
+  // stack at all", never "this oracle could not find it".
+  if (hasDependency && entryFilesExist !== true) {
+    throw new Error(
+      "The app depends on @warlock.js/web but no web entry files were found under src/web " +
+        "(expected root.tsx plus at least one *.page.tsx). Refusing to report hasWeb=false, " +
+        "because that would silently skip the browser oracle for a web-bearing app.",
+    );
+  }
+
+  return hasDependency;
 }
 
 /**
@@ -324,11 +348,49 @@ async function readJsonIfExists(filePath) {
   return readJson(filePath);
 }
 
+/**
+ * Whether the app has a scaffolded web page layer.
+ *
+ * Looks for `src/web/root.tsx` plus **any** `*.page.tsx` beneath `src/web`,
+ * rather than one hardcoded page filename. The previous version required
+ * `src/web/home.page.tsx`, which `warlock add web` has never written — it
+ * writes `index.page.tsx` (`core/src/generations/features/web.feature.ts:127`)
+ * — so this returned false for every web-bearing app and the browser oracle
+ * was silently skipped on every row.
+ *
+ * A page name is the generator's to choose; the presence of a page layer is
+ * what this needs to know.
+ *
+ * @param appRoot The generated app's root.
+ * @returns Whether a web page layer is present on disk.
+ */
 function webEntryFilesExist(appRoot) {
-  return (
-    existsSync(path.join(appRoot, "src", "web", "root.tsx")) &&
-    existsSync(path.join(appRoot, "src", "web", "home.page.tsx"))
-  );
+  const webRoot = path.join(appRoot, "src", "web");
+
+  if (!existsSync(path.join(webRoot, "root.tsx"))) return false;
+
+  const stack = [webRoot];
+
+  while (stack.length > 0) {
+    const directory = stack.pop();
+    let entries;
+
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        stack.push(path.join(directory, entry.name));
+      } else if (entry.name.endsWith(".page.tsx")) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 function coreBinPath(root) {

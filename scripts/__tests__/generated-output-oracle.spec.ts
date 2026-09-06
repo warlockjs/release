@@ -159,8 +159,20 @@ describe("detectHasWeb", () => {
     assert.equal(detectHasWeb({ dependencies: { "@warlock.js/web": "^5.0.0" } }, true), true);
   });
 
-  it("is false when the dependency is present but the entry files are missing (stale dependency)", () => {
-    assert.equal(detectHasWeb({ dependencies: { "@warlock.js/web": "^5.0.0" } }, false), false);
+  it("THROWS when the dependency is present but no entry files were found, rather than silently reporting no web", () => {
+    // This spec previously asserted `false` here, and that assertion is what
+    // let the real defect ship: the page check looked for
+    // `src/web/home.page.tsx` while `warlock add web` writes
+    // `src/web/index.page.tsx`, so hasWeb was false for EVERY web-bearing row,
+    // the gate returned early at `if (!certificate.hasWeb) return;`, and the
+    // browser oracle never ran once — while the rows reported clean passes.
+    //
+    // A false here may now only mean "this app has no web stack", never "this
+    // oracle could not find it". The disagreement is the alarm.
+    assert.throws(
+      () => detectHasWeb({ dependencies: { "@warlock.js/web": "^5.0.0" } }, false),
+      /no web entry files were found/,
+    );
   });
 
   it("is false when the entry files exist but the dependency does not", () => {

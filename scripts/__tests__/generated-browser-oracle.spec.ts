@@ -203,8 +203,26 @@ describe("findIncrementMutationCandidate — real generated-app source", () => {
 
     const candidate = findIncrementMutationCandidate(homePageSource);
     assert.ok(candidate, "expected an increment candidate in the real webHomePageStub");
-    assert.equal(candidate?.find, "setCount(c => c + 1)");
-    assert.equal(candidate?.replacement, "setCount(c => c)");
+
+    // Assert the PROPERTIES the gate requires of a mutation, not a literal
+    // token. This spec previously pinned `setCount(c => c + 1)` and went red
+    // the moment the stub was formatted under the scaffold's own prettier
+    // config (`arrowParens: "always"` makes it `setCount((c) => c + 1)`) —
+    // even though the adapter was correct. A literal here pins the formatter,
+    // not the behaviour.
+    //
+    // `proveBrowserMutation` (zero-edit-generator-gate.ts:282-310) requires
+    // exactly this much: `find` occurs EXACTLY ONCE in the file, and
+    // `replacement` differs from it.
+    assert.equal(
+      homePageSource.split(candidate!.find).length - 1,
+      1,
+      "the nominated token must occur exactly once — the gate refuses anything else",
+    );
+    assert.notEqual(candidate?.find, candidate?.replacement);
+    // And it must really be the counter increment being neutralised.
+    assert.match(candidate!.find, /setCount\(\s*\(?\s*\w+\s*\)?\s*=>\s*\w+\s*\+\s*1\s*\)/);
+    assert.ok(!/\+\s*1/.test(candidate!.replacement), "the replacement must stop incrementing");
     // The count-up button is the second <button> in the template (index 1):
     // the first is the language toggle above it in source order.
     assert.equal(candidate?.buttonIndex, 1);
