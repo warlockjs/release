@@ -31,9 +31,11 @@ import { fileURLToPath } from "node:url";
 import { parseOracleArguments } from "../adapters/oracle-arguments.mjs";
 import {
   buildCertificate,
+  counterAdvancedByOne,
   decideOutcome,
   deriveFilesystemRoutePath,
   discoverPages,
+  extractCounterValue,
   extractDeclaredRoutePath,
   findHomePage,
   findIncrementMutationCandidate,
@@ -241,6 +243,54 @@ describe("findIncrementMutationCandidate — real generated-app source", () => {
 
   it("returns undefined for a page with no useState at all", () => {
     assert.equal(findIncrementMutationCandidate("export default function Page() { return <button>Click</button>; }"), undefined);
+  });
+});
+
+describe("extractCounterValue — reading the counter the way a user would", () => {
+  it("extracts the counter's value from the real scaffold's container text with the button label removed", () => {
+    // This is the literal text `driveBrowserPhase`'s readCounterContainerText
+    // expression would produce for core's real webHomePageStub `.wk-check`
+    // section — the button's own "Count up" label already stripped out.
+    const containerText = "If this number goes up when you click, React is hydrated:0";
+    assert.equal(extractCounterValue(containerText), 0);
+  });
+
+  it("extracts a multi-digit value after several increments", () => {
+    assert.equal(extractCounterValue("If this number goes up when you click, React is hydrated:12"), 12);
+  });
+
+  it("throws COUNTER_VALUE_NOT_FOUND, naming the searched text, when no digits are present", () => {
+    assert.throws(
+      () => extractCounterValue("If this number goes up when you click, React is hydrated:"),
+      /COUNTER_VALUE_NOT_FOUND/,
+    );
+  });
+});
+
+describe("counterAdvancedByOne — the actual pass/fail rule for the click assertion", () => {
+  it("passes when the count went up by exactly one", () => {
+    assert.equal(counterAdvancedByOne(0, 1), true);
+    assert.equal(counterAdvancedByOne(7, 8), true);
+  });
+
+  it("fails when the count did not move at all — the exact shape of the real mutation-control corruption", () => {
+    // setCount(c => c + 1) mutated to setCount(c => c): a click changes
+    // nothing, so before/after are equal. This is the case the whole-page
+    // text-diff this replaces could fail to catch if anything else on the
+    // page happened to change; reading the counter specifically cannot.
+    assert.equal(counterAdvancedByOne(0, 0), false);
+    assert.equal(counterAdvancedByOne(5, 5), false);
+  });
+
+  it("fails on any jump other than exactly +1", () => {
+    assert.equal(counterAdvancedByOne(0, 2), false);
+    assert.equal(counterAdvancedByOne(3, 1), false);
+  });
+
+  it("fails when either reading is not an integer", () => {
+    assert.equal(counterAdvancedByOne(Number.NaN, 1), false);
+    assert.equal(counterAdvancedByOne(0, Number.NaN), false);
+    assert.equal(counterAdvancedByOne(0.5, 1.5), false);
   });
 });
 

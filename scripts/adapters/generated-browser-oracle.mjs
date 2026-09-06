@@ -56,6 +56,13 @@
  * least one same-origin anchor with no `target` attribute in the rendered
  * DOM; finding none fails loudly with `NO_INTERNAL_LINK_FOUND` instead of
  * inventing a link.
+ *
+ * `clickPassed` itself reads the counter's own rendered text — not "did the
+ * page change at all" — before and after ONE click, and requires it to have
+ * advanced by EXACTLY one ({@link extractCounterValue}, {@link
+ * counterAdvancedByOne}). A missing or non-numeric counter throws
+ * `COUNTER_VALUE_NOT_FOUND` rather than silently reporting `clickPassed:
+ * false`/`true` — see `driveBrowserPhase`.
  */
 
 import { spawn } from "node:child_process";
@@ -247,6 +254,50 @@ function countPrecedingButtons(source, offset) {
   const before = source.slice(0, offset);
   const matches = before.match(/<button\b/g);
   return matches ? matches.length - 1 : 0;
+}
+
+/**
+ * Extract the counter's rendered numeric value from a text snippet that is
+ * the increment button's container text with the button's OWN label removed
+ * (see the `readCounterContainerText` expression in `driveBrowserPhase`).
+ * This is the same text a real user would read off the page — not a React
+ * internal — so a broken render is exactly as invisible/visible to this
+ * function as it is to a person looking at the screen.
+ *
+ * Throws a named error instead of returning a fabricated number: a missing
+ * or non-numeric counter must fail the oracle loudly, never silently resolve
+ * to `clickPassed: false` (which would look identical to "the counter didn't
+ * advance") or `true`.
+ *
+ * @param {string} containerTextWithoutButtonLabel
+ * @returns {number} The first integer (optionally signed) found in the text.
+ */
+export function extractCounterValue(containerTextWithoutButtonLabel) {
+  const match = containerTextWithoutButtonLabel.match(/-?\d+/);
+  if (!match) {
+    throw new Error(
+      `COUNTER_VALUE_NOT_FOUND: no numeric text found near the increment button ` +
+        `(searched ${JSON.stringify(containerTextWithoutButtonLabel)}).`,
+    );
+  }
+  return Number(match[0]);
+}
+
+/**
+ * Pure decision: did one click legitimately advance the counter — the exact
+ * thing the gate's mutation control breaks (`setCount(c => c + 1)` becomes
+ * `setCount(c => c)`)? Requires both readings to be real integers AND the
+ * after-value to be EXACTLY one more than the before-value. This is
+ * deliberately stricter than "the value changed": a page whose click handler
+ * did something else entirely (jumped by two, decremented, reset) must not
+ * pass either.
+ *
+ * @param {number} beforeCount
+ * @param {number} afterCount
+ * @returns {boolean}
+ */
+export function counterAdvancedByOne(beforeCount, afterCount) {
+  return Number.isInteger(beforeCount) && Number.isInteger(afterCount) && afterCount === beforeCount + 1;
 }
 
 /**
@@ -634,22 +685,35 @@ async function driveBrowserPhase({ baseUrl, chromeExecutable, homePage, includeH
     );
 
     // --- click assertion ---------------------------------------------------
+    // Read the SAME rendered number a user would read off the page — the
+    // increment button's nearest block container, with the button's own
+    // label text stripped out — before and after ONE click, and require it
+    // to have advanced by exactly one. "Some text on the page changed" is
+    // NOT this assertion: the gate's mutation control corrupts
+    // `setCount(c => c + 1)` into `setCount(c => c)`, and that corruption
+    // must be caught here even on a page where clicking happens to move
+    // unrelated text around.
     const hasButton = await evaluate(cdp, sessionId, `document.querySelectorAll("button")[${homePage.buttonIndex}] !== undefined`);
     if (!hasButton) throw new Error(`NO_INCREMENT_BUTTON_FOUND: button index ${homePage.buttonIndex} is not present in the rendered DOM.`);
-    const beforeClickText = await evaluate(cdp, sessionId, "document.body.innerText");
-    await evaluate(
-      cdp,
-      sessionId,
-      `(() => { document.querySelectorAll("button")[${homePage.buttonIndex}].click(); return true; })()`,
-    );
+
+    const readCounterContainerText = `(() => {
+      const button = document.querySelectorAll("button")[${homePage.buttonIndex}];
+      const container = button.closest("section, article, li, div") ?? button.parentElement ?? document.body;
+      const buttonLabel = button.textContent ?? "";
+      return (container.textContent ?? "").split(buttonLabel).join("");
+    })()`;
+
+    const beforeCounterText = await evaluate(cdp, sessionId, readCounterContainerText);
+    const beforeCount = extractCounterValue(beforeCounterText);
     await evaluate(
       cdp,
       sessionId,
       `(() => { document.querySelectorAll("button")[${homePage.buttonIndex}].click(); return true; })()`,
     );
     await delay(250);
-    const afterClickText = await evaluate(cdp, sessionId, "document.body.innerText");
-    const clickPassed = afterClickText !== beforeClickText;
+    const afterCounterText = await evaluate(cdp, sessionId, readCounterContainerText);
+    const afterCount = extractCounterValue(afterCounterText);
+    const clickPassed = counterAdvancedByOne(beforeCount, afterCount);
 
     // --- SPA navigation assertion -------------------------------------------
     const internalLinkCount = await evaluate(
