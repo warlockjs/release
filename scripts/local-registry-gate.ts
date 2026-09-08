@@ -58,6 +58,13 @@ export interface CandidateArtifact {
   sha256: string;
 }
 
+/**
+ * The three answers canon `e00fb7b8` permits to "does the generator matrix
+ * run for this release?". All three may publish; what none of them may do is
+ * go unstated.
+ */
+export type MatrixScope = "full" | "subset" | "none";
+
 export interface LocalRegistryGateInput {
   candidateVersion: string;
   /** Exact family set in the caller-owned publish order. */
@@ -75,9 +82,27 @@ export interface LocalRegistryGateInput {
   generatedOutputOraclePath: string | undefined;
   browserOracleAdapterPath: string | undefined;
   /**
-   * Opt-in subset selection, threaded straight through to the generator gate
-   * unexamined -- this module has no opinion on feature names. Absent for a
-   * normal full-matrix run.
+   * How much of the zero-edit generator matrix this run executes.
+   *
+   * REQUIRED, with no default, and that is the point. Canon `e00fb7b8` made
+   * the matrix opt-in: a release may ship without it. The safeguard that
+   * replaced the mandatory gate is the RECORD -- every release states the
+   * scope it ran, in the handoff, the release summary and
+   * `docs/src/data/releases.json`. A default here would let an unstated scope
+   * become a stated one by accident, which is exactly the silent degradation
+   * the ruling was written to prevent.
+   *
+   * `"none"` skips the matrix and nothing else: the registry is still owned
+   * and started, every tarball is still staged, and every member is still
+   * confirmed installable from it. Skipping the matrix is not skipping the
+   * gate.
+   */
+  matrixScope: MatrixScope;
+  /**
+   * The rows a `"subset"` run executes, threaded straight through to the
+   * generator gate unexamined -- this module has no opinion on feature names.
+   * Required for `"subset"`, refused for the other two: a row list on a
+   * `"none"` run would describe rows nothing ran.
    */
   onlyFeatures?: readonly string[];
 }
@@ -91,6 +116,18 @@ export interface PublishHandoff {
     sha256: string;
   }>;
   verifiedAt: string;
+  /**
+   * What this candidate was verified BY, carried in the artifact that
+   * authorises the publish rather than left to a human to remember.
+   *
+   * A degraded release must degrade loudly: a handoff whose scope is
+   * `"none"` says so to everything downstream -- the publish step, the
+   * release summary, and the public record in `releases.json` -- instead of
+   * looking identical to one that ran all 30 rows.
+   */
+  matrixScope: MatrixScope;
+  /** The rows that actually ran. Present only for `"subset"`. */
+  matrixRows?: readonly string[];
 }
 
 export type GateEvent =
@@ -103,6 +140,7 @@ export type GateEvent =
   | "artifact-confirmed-locally"
   | "generator-gate-started"
   | "generator-gate-passed"
+  | "generator-gate-skipped"
   | "registry-stopped"
   | "registry-server-proved-closed"
   | "port-proved-dead"
@@ -201,6 +239,47 @@ function assertCandidate(input: LocalRegistryGateInput): void {
       throw new Error(`Artifact ${artifact.name} must provide an exact SHA-256`);
     }
   }
+
+  assertMatrixScopeAgreesWithRows(input.matrixScope, input.onlyFeatures);
+}
+
+/**
+ * The scope and the row list must describe the same run.
+ *
+ * A `"subset"` with no rows would run the whole matrix while the handoff
+ * claimed a subset; a `"full"` or `"none"` carrying rows would record rows
+ * that either were not the selection or did not run at all. Either way the
+ * handoff would misdescribe what was verified, which is the one thing it
+ * exists to get right.
+ */
+export function assertMatrixScopeAgreesWithRows(
+  scope: MatrixScope,
+  rows: readonly string[] | undefined,
+): void {
+  // Checked here rather than trusted from the type, because the callers that
+  // matter are a CLI and a JSON file on disk. An absent scope reaching the
+  // handoff would only be caught at publish time — long after the 28 builds,
+  // the registry and the gate have all been paid for.
+  if (scope !== "full" && scope !== "subset" && scope !== "none") {
+    throw new Error(
+      `matrixScope must be stated as one of "full" | "subset" | "none"; got ${JSON.stringify(scope)}.`,
+    );
+  }
+
+  if (scope === "subset") {
+    if (!rows || rows.length === 0) {
+      throw new Error(
+        'matrixScope "subset" requires the rows it runs -- a subset with no selection is a full run wearing the wrong label.',
+      );
+    }
+    return;
+  }
+
+  if (rows && rows.length > 0) {
+    throw new Error(
+      `matrixScope "${scope}" must not carry a row selection; got ${rows.join(", ")}.`,
+    );
+  }
 }
 
 function snapshotCandidate(input: LocalRegistryGateInput): Readonly<LocalRegistryGateInput> {
@@ -222,6 +301,7 @@ function snapshotCandidate(input: LocalRegistryGateInput): Readonly<LocalRegistr
     featureCatalogAdapterPath: input.featureCatalogAdapterPath,
     generatedOutputOraclePath: input.generatedOutputOraclePath,
     browserOracleAdapterPath: input.browserOracleAdapterPath,
+    matrixScope: input.matrixScope,
     onlyFeatures: input.onlyFeatures ? Object.freeze([...input.onlyFeatures]) : undefined,
   });
 }
@@ -748,19 +828,27 @@ export async function runLocalRegistryPreGate(
       event("artifact-confirmed-locally", artifact.name);
     }
 
-    event("generator-gate-started");
-    await dependencies.runZeroEditGeneratorGate({
-      candidateVersion: candidate.candidateVersion,
-      artifacts: candidate.artifacts,
-      registryUrl,
-      npmEnvironment: Object.freeze({ ...env }),
-      workspaceDirectory,
-      featureCatalogAdapterPath: candidate.featureCatalogAdapterPath,
-      generatedOutputOraclePath: candidate.generatedOutputOraclePath,
-      browserOracleAdapterPath: candidate.browserOracleAdapterPath,
-      onlyFeatures: candidate.onlyFeatures,
-    });
-    event("generator-gate-passed");
+    if (candidate.matrixScope === "none") {
+      // Everything above this line still ran: the registry was owned and
+      // started, all 28 tarballs staged, and every member confirmed
+      // installable from it. What is skipped is the matrix, and the handoff
+      // says so -- it does not quietly resemble a run that executed it.
+      event("generator-gate-skipped");
+    } else {
+      event("generator-gate-started");
+      await dependencies.runZeroEditGeneratorGate({
+        candidateVersion: candidate.candidateVersion,
+        artifacts: candidate.artifacts,
+        registryUrl,
+        npmEnvironment: Object.freeze({ ...env }),
+        workspaceDirectory,
+        featureCatalogAdapterPath: candidate.featureCatalogAdapterPath,
+        generatedOutputOraclePath: candidate.generatedOutputOraclePath,
+        browserOracleAdapterPath: candidate.browserOracleAdapterPath,
+        onlyFeatures: candidate.onlyFeatures,
+      });
+      event("generator-gate-passed");
+    }
     gatePassed = true;
   } catch (error) {
     gateFailure = error;
@@ -825,6 +913,10 @@ export async function runLocalRegistryPreGate(
       ),
     ),
     verifiedAt: (dependencies.now?.() ?? new Date()).toISOString(),
+    matrixScope: candidate.matrixScope,
+    ...(candidate.onlyFeatures
+      ? { matrixRows: Object.freeze([...candidate.onlyFeatures]) }
+      : {}),
   });
 
   await dependencies.emitHandoff?.(handoff);

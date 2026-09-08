@@ -24,6 +24,8 @@ import {
   type CandidateArtifact,
   type LocalRegistryGateDependencies,
   type LocalRegistryGateInput,
+  assertMatrixScopeAgreesWithRows,
+  type MatrixScope,
   type PublishHandoff,
 } from "./local-registry-gate.ts";
 import {
@@ -69,12 +71,47 @@ export interface ReleaseOptions {
    */
   reuseArtifacts?: boolean;
   /**
+   * How much of the zero-edit generator matrix this gate run executes.
+   *
+   * REQUIRED in gate mode, with no default. Canon `e00fb7b8` (owner ruling,
+   * 2026-09-07, rev. 3) made the matrix OFF by default and let all three
+   * scopes publish -- deliberately reversing rev. 2, which had said a
+   * skipped matrix may never ship. What replaced the mandatory gate is the
+   * RECORD: every release states its scope, and a release whose scope is not
+   * stated must not ship. So this is asked for rather than defaulted; a
+   * default is how an unstated scope becomes a stated one by accident.
+   */
+  matrixScope?: MatrixScope;
+  /**
    * Opt-in: run only the baseline row plus the named feature rows (and the
    * composed row when "composed" is explicitly included) instead of the full
-   * matrix. A run using this can NEVER emit a publish handoff. Ignored
-   * outside gate mode.
+   * matrix. Required by, and only valid with, `matrixScope: "subset"`.
+   * Ignored outside gate mode.
    */
   only?: readonly string[];
+  /**
+   * The owner's authorisation for running the matrix at all, quoted.
+   *
+   * Required for `"subset"` and `"full"`, refused for `"none"` (the
+   * default scope needs no permission -- it is the one nobody has to ask
+   * for). The runner CANNOT synthesise this: it is words the owner said, on
+   * a date, and it is carried into the release summary verbatim because a
+   * reference that only resolves inside Bureau is a dangling pointer
+   * everywhere else (canon `09374678`).
+   */
+  matrixAuthorisation?: MatrixAuthorisation;
+}
+
+/**
+ * An owner authorisation to run the matrix, as it must appear in the release
+ * summary: who, when, and what they actually said.
+ */
+export interface MatrixAuthorisation {
+  authorisedBy: string;
+  /** ISO date (YYYY-MM-DD) the authorisation was given. */
+  date: string;
+  /** The owner's own words, quoted -- never a paraphrase or a bare pointer. */
+  quote: string;
 }
 
 /** One family member's recorded build, kept alongside its tarball so a later run can prove reuse is still valid. */
@@ -99,6 +136,8 @@ export interface BuildProvenance {
 
 export interface ReleaseHandoff extends PublishHandoff {
   subjects: readonly string[];
+  /** Present exactly when the scope is not `"none"`; see {@link MatrixAuthorisation}. */
+  matrixAuthorisation?: MatrixAuthorisation;
   /** Set only when this handoff's artifacts came from `--reuse-artifacts` instead of a fresh build. */
   reusedArtifacts?: boolean;
   /** The exact provenance proving each reused artifact is still valid -- carried into the handoff so the fact is never lost. */
@@ -189,7 +228,9 @@ export async function runReleaseFamily(
   if (options.mode === "gate") {
     return await prepareAndGate(family, options.version, handoffPath, runtime, {
       reuseArtifacts: options.reuseArtifacts,
+      matrixScope: assertMatrixScopeIsStated(options),
       only: options.only,
+      matrixAuthorisation: options.matrixAuthorisation,
     });
   }
 
@@ -210,7 +251,90 @@ export async function runReleaseFamily(
 
 export interface PrepareAndGateOptions {
   reuseArtifacts?: boolean;
+  matrixScope?: MatrixScope;
   only?: readonly string[];
+  matrixAuthorisation?: MatrixAuthorisation;
+}
+
+/**
+ * Refuse a gate run that has not said how much of the matrix it runs, and
+ * refuse a scope whose supporting arguments do not match it.
+ *
+ * Split out and exported so the rules can be exercised without building 28
+ * packages first. The three refusals, and why each is a refusal rather than a
+ * default:
+ *
+ * - **No scope at all.** Canon `e00fb7b8`: "a release whose scope is not
+ *   stated must not ship". The scope reaches the public record through the
+ *   handoff, so the handoff is where the requirement has to bite.
+ * - **`subset` without rows, or `full`/`none` with them.** A handoff that
+ *   misdescribes what ran is worse than one that admits it ran nothing.
+ * - **`subset`/`full` without an authorisation.** The matrix is opt-in and
+ *   only the owner opts in. The runner cannot read Bureau (the ruling says so
+ *   itself), so the authorisation is supplied as the owner's quoted words and
+ *   date; what the runner CAN do is refuse to invent them.
+ *
+ * `none` deliberately needs no authorisation. It is the default the ruling
+ * chose, and requiring permission for the default would be requiring
+ * permission to do nothing.
+ */
+export function assertMatrixScopeIsStated(options: {
+  matrixScope?: MatrixScope;
+  only?: readonly string[];
+  matrixAuthorisation?: MatrixAuthorisation;
+}): MatrixScope {
+  const scope = options.matrixScope;
+
+  if (!scope) {
+    throw new Error(
+      [
+        "Refusing to gate: this run has not stated its generator-matrix scope.",
+        "Pass --matrix none | subset | full.",
+        "",
+        "The matrix is OFF by default and a release may ship without it (canon e00fb7b8),",
+        "but EVERY release states the scope it ran -- in the handoff, the release summary and",
+        "docs/src/data/releases.json. That record is the entire safeguard that replaced the",
+        "mandatory gate, so an unstated scope is refused here rather than defaulted.",
+      ].join("\n"),
+    );
+  }
+
+  assertMatrixScopeAgreesWithRows(scope, options.only);
+
+  if (scope === "none") {
+    if (options.matrixAuthorisation) {
+      throw new Error(
+        'matrixScope "none" needs no authorisation -- it is the default. Drop --authorised-by/--authorisation.',
+      );
+    }
+    return scope;
+  }
+
+  const authorisation = options.matrixAuthorisation;
+  if (!authorisation) {
+    throw new Error(
+      [
+        `Refusing to run the matrix at scope "${scope}" with no recorded owner authorisation.`,
+        "Pass --authorised-by <name> --authorisation-date <YYYY-MM-DD> --authorisation \"<their words>\".",
+        "",
+        "The matrix is opt-in and only the owner opts in. This runner cannot read Bureau, so it",
+        "cannot check that the authorisation is real -- what it can do is refuse to invent one.",
+        "The quote is carried into the release summary verbatim (canon 09374678).",
+      ].join("\n"),
+    );
+  }
+
+  if (!authorisation.authorisedBy.trim()) {
+    throw new Error("--authorised-by must name a person.");
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(authorisation.date)) {
+    throw new Error(`--authorisation-date must be an ISO date (YYYY-MM-DD); got "${authorisation.date}".`);
+  }
+  if (!authorisation.quote.trim()) {
+    throw new Error("--authorisation must carry the owner's actual words, not an empty string.");
+  }
+
+  return scope;
 }
 
 async function prepareAndGate(
@@ -226,13 +350,29 @@ async function prepareAndGate(
   const artifactDirectory = path.join(ARTIFACT_ROOT, version);
   await runtime.makeDirectory(artifactDirectory);
 
+  const matrixScope = options.matrixScope ?? "none";
   const only = options.only;
-  if (only) {
-    // Loud at the START: a subset run must never be mistaken for the real thing.
+
+  // Loud at the START, and now TRUE at the end too. This warning used to say a
+  // subset run "CANNOT produce a publish handoff, under any circumstance" —
+  // which was accurate about the code and, after canon `e00fb7b8`, wrong about
+  // the ruling: the owner reversed rev. 2 on purpose and all three scopes may
+  // publish. A refusal the owner has explicitly lifted is not a safeguard, it
+  // is a trap someone hits mid-release and routes around. What replaced it is
+  // the record: the scope rides in the handoff and must reach the release
+  // summary and `releases.json`.
+  if (matrixScope === "subset") {
     console.warn(
-      `[release-family] SUBSET GATE RUN (--only ${only.join(",")}): baseline always runs; composed row ` +
-        `${only.includes("composed") ? "WILL run (explicitly requested)" : "is SKIPPED (pass --only composed to include it)"}. ` +
-        "This run CANNOT produce a publish handoff, under any circumstance.",
+      `[release-family] SUBSET GATE RUN (--only ${(only ?? []).join(",")}): baseline always runs; composed row ` +
+        `${(only ?? []).includes("composed") ? "WILL run (explicitly requested)" : "is SKIPPED (pass --only composed to include it)"}. ` +
+        "The handoff will record matrixScope=subset and the exact rows.",
+    );
+  } else if (matrixScope === "none") {
+    console.warn(
+      "[release-family] MATRIX NOT RUN (--matrix none): the local registry is still owned, all 28 tarballs " +
+        "are still staged and every member is still confirmed installable — but the zero-edit generator " +
+        "matrix, the only check that answers \"does what we publish actually work?\", does not run. " +
+        "The handoff will record matrixScope=none, and that MUST reach the release summary and releases.json.",
     );
   }
 
@@ -276,6 +416,7 @@ async function prepareAndGate(
       featureCatalogAdapterPath: process.env.WARLOCK_FEATURE_CATALOG_ADAPTER,
       generatedOutputOraclePath: process.env.WARLOCK_GENERATED_OUTPUT_ORACLE,
       browserOracleAdapterPath: process.env.WARLOCK_GENERATED_BROWSER_ORACLE,
+      matrixScope,
       onlyFeatures: only,
     },
     {
@@ -288,22 +429,10 @@ async function prepareAndGate(
     ...gated,
     artifacts: gated.artifacts.map(artifact => ({ ...artifact })),
     subjects: family.members.map(member => member.name),
+    ...(options.matrixAuthorisation ? { matrixAuthorisation: options.matrixAuthorisation } : {}),
     ...(reusedArtifacts ? { reusedArtifacts: true, reuseProvenance } : {}),
   };
   assertHandoffMatchesArtifacts(handoff, artifacts, version);
-
-  if (only) {
-    // Loud at the END, and enforced HERE: whatever passed above, a subset
-    // run must never reach `writeHandoff` -- it cannot authorise a publish.
-    throw new Error(
-      [
-        `SUBSET GATE RUN COMPLETE (--only ${only.join(",")}): the selected matrix rows passed, but`,
-        "refusing to write a publish handoff -- a subset run can NEVER authorise a publish.",
-        "This was only useful for iterating on the named row(s); run the full gate (no --only) to",
-        "produce a handoff eligible for publish/confirm.",
-      ].join(" "),
-    );
-  }
 
   await runtime.writeHandoff(handoffPath, handoff);
   return handoff;
@@ -1248,12 +1377,20 @@ function parseAndValidateHandoff(
   }
   if (!Array.isArray(record.artifacts)) throw new Error("Publish handoff artifacts must be an array.");
   const artifacts = record.artifacts.map(parseHandoffArtifact);
+  const matrixScope = parseHandoffMatrixScope(record.matrixScope);
+  const matrixRows = parseHandoffMatrixRows(record.matrixRows);
+  assertMatrixScopeAgreesWithRows(matrixScope, matrixRows);
   const handoff = {
     kind: record.kind,
     candidateVersion: version,
     subjects: record.subjects,
     artifacts,
     verifiedAt: String(record.verifiedAt ?? ""),
+    matrixScope,
+    ...(matrixRows ? { matrixRows } : {}),
+    ...(record.matrixAuthorisation
+      ? { matrixAuthorisation: record.matrixAuthorisation as MatrixAuthorisation }
+      : {}),
   } satisfies ReleaseHandoff;
   const expected = family.members.map(member => member.name);
   if (!equalStrings(handoff.subjects, expected)) {
@@ -1263,6 +1400,39 @@ function parseAndValidateHandoff(
     throw new Error("Publish handoff artifact list is missing, added, or out of order.");
   }
   return handoff;
+}
+
+/**
+ * A handoff with no `matrixScope` is REFUSED, not treated as `"none"`.
+ *
+ * It is either a handoff written before this field existed, or one written by
+ * something that does not know the field is required — and both mean the same
+ * thing: nobody can say how this candidate was verified. Canon `e00fb7b8`:
+ * "a release whose scope is not stated must not ship". Defaulting it here
+ * would state a scope on the release's behalf, which is precisely the silent
+ * degradation the ruling exists to prevent.
+ */
+function parseHandoffMatrixScope(value: unknown): MatrixScope {
+  if (value === "full" || value === "subset" || value === "none") return value;
+
+  throw new Error(
+    [
+      `Publish handoff carries no usable matrixScope (found ${JSON.stringify(value)}).`,
+      "Re-run the gate with --matrix none | subset | full.",
+      "",
+      "This is not defaulted on purpose: an unstated scope must not ship (canon e00fb7b8),",
+      "and a handoff is the artifact that carries the scope to the release summary and",
+      "docs/src/data/releases.json.",
+    ].join("\n"),
+  );
+}
+
+function parseHandoffMatrixRows(value: unknown): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every(item => typeof item === "string")) {
+    throw new Error("Publish handoff matrixRows must be a string array when present.");
+  }
+  return value as readonly string[];
 }
 
 function parseHandoffArtifact(value: unknown): CandidateArtifact {
@@ -1569,6 +1739,10 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
   let handoffPath: string | undefined;
   let reuseArtifacts = false;
   let only: readonly string[] | undefined;
+  let matrixScope: MatrixScope | undefined;
+  let authorisedBy: string | undefined;
+  let authorisationDate: string | undefined;
+  let authorisationQuote: string | undefined;
   for (let index = 0; index < values.length; index += 1) {
     const argument = values[index];
     if (argument === "--version") version = values[++index] ?? "";
@@ -1578,16 +1752,44 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     else if (argument === "--reuse-artifacts") reuseArtifacts = true;
     else if (argument === "--only") only = parseOnlyArgument(values[++index]);
     else if (argument.startsWith("--only=")) only = parseOnlyArgument(argument.slice("--only=".length));
+    else if (argument === "--matrix") matrixScope = parseMatrixScope(values[++index]);
+    else if (argument.startsWith("--matrix=")) matrixScope = parseMatrixScope(argument.slice("--matrix=".length));
+    else if (argument === "--authorised-by") authorisedBy = values[++index];
+    else if (argument.startsWith("--authorised-by=")) authorisedBy = argument.slice("--authorised-by=".length);
+    else if (argument === "--authorisation-date") authorisationDate = values[++index];
+    else if (argument.startsWith("--authorisation-date=")) authorisationDate = argument.slice("--authorisation-date=".length);
+    else if (argument === "--authorisation") authorisationQuote = values[++index];
+    else if (argument.startsWith("--authorisation=")) authorisationQuote = argument.slice("--authorisation=".length);
     else throw new Error(`Unknown release-family argument: ${argument}.`);
   }
   assertExactVersion(version);
+
+  // Assembled only when SOMETHING was given: a half-filled authorisation is
+  // reported by `assertMatrixScopeIsStated` naming the missing piece, rather
+  // than silently becoming "no authorisation" and producing the wrong refusal.
+  const matrixAuthorisation =
+    authorisedBy !== undefined || authorisationDate !== undefined || authorisationQuote !== undefined
+      ? {
+          authorisedBy: authorisedBy ?? "",
+          date: authorisationDate ?? "",
+          quote: authorisationQuote ?? "",
+        }
+      : undefined;
+
   return {
     mode,
     version,
     handoffPath,
     reuseArtifacts: reuseArtifacts || undefined,
+    matrixScope,
     only,
+    matrixAuthorisation,
   };
+}
+
+function parseMatrixScope(raw: string | undefined): MatrixScope {
+  if (raw === "full" || raw === "subset" || raw === "none") return raw;
+  throw new Error(`--matrix must be one of none | subset | full; got "${raw ?? ""}".`);
 }
 
 function parseOnlyArgument(raw: string | undefined): string[] {

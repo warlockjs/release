@@ -35,6 +35,10 @@ const INPUT: LocalRegistryGateInput = {
   featureCatalogAdapterPath: FEATURE_ADAPTER,
   generatedOutputOraclePath: OUTPUT_ORACLE,
   browserOracleAdapterPath: BROWSER_ORACLE,
+  // Stated, never defaulted — see `assertMatrixScopeAgreesWithRows`. These
+  // cases are all about the sequencing around a matrix that DOES run, so they
+  // say `"full"`; the `"none"` path has its own case below.
+  matrixScope: "full",
 };
 
 function fixture(overrides: Partial<LocalRegistryGateDependencies> = {}) {
@@ -132,6 +136,50 @@ describe("local registry unit sequencing controls (not the real-registry accepta
     assert.equal(control.count.ready, 0);
     assert.equal(control.count.stopped, 1);
     assert.deepEqual(control.deadPorts, [48731]);
+  });
+
+  it('matrixScope "none" skips the MATRIX and nothing else — registry, staging and per-member confirmation all still run', async () => {
+    let generatorRan = false;
+    const control = fixture({
+      runZeroEditGeneratorGate: async () => {
+        generatorRan = true;
+      },
+    });
+
+    const handoff = await runLocalRegistryPreGate(
+      { ...INPUT, matrixScope: "none" },
+      control.dependencies,
+    );
+
+    assert.equal(generatorRan, false, "the matrix must not run at scope none");
+    assert.ok(control.events.includes("generator-gate-skipped"));
+    assert.equal(control.events.includes("generator-gate-passed"), false);
+
+    // The part that is NOT skipped, asserted rather than assumed: the registry
+    // was owned and torn down, and every one of the 28 members was staged and
+    // confirmed installable from it. "Skipping the matrix" must not quietly
+    // become "skipping the gate".
+    assert.ok(control.events.includes("registry-ready"));
+    assert.ok(control.events.includes("registry-server-proved-closed"));
+    assert.equal(
+      control.events.filter((event) => event === "artifact-confirmed-locally").length,
+      WARLOCK_FAMILY_PACKAGE_NAMES.length,
+    );
+
+    // And it says so where it counts.
+    assert.equal(handoff.matrixScope, "none");
+    assert.equal(handoff.matrixRows, undefined);
+  });
+
+  it("REFUSES a candidate that states no matrixScope, before anything is built or started", async () => {
+    const control = fixture();
+    const { matrixScope, ...withoutScope } = INPUT;
+
+    await assert.rejects(
+      runLocalRegistryPreGate(withoutScope as typeof INPUT, control.dependencies),
+      /matrixScope must be stated/,
+    );
+    assert.deepEqual(control.events, [], "nothing may start before the scope is known");
   });
 
   it("keeps an innocent candidate local, immutable, sanitized, and hands off after all proofs", async () => {

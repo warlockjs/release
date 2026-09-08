@@ -4,3 +4,9 @@ sources
 coverage
 *.log
 .DS_Store
+
+# Release run output: built tarballs and the handoffs that authorise a publish.
+# Both are produced by `release-family.ts` and are reproducible from source;
+# a handoff in particular is a per-run credential, not a checked-in artifact.
+release-artifacts
+release-handoffs

@@ -6,8 +6,10 @@ import { describe, it } from "node:test";
 import type { PublishHandoff } from "../local-registry-gate.ts";
 import {
   NPM_ORIGIN,
+  assertMatrixScopeIsStated,
   assertSinglePhysicalCore,
   checkPackageTreeIsClean,
+  parseArguments,
   parseGitPorcelain,
   qualityCheckEnvironment,
   resolveLocalPackageScript,
@@ -20,6 +22,24 @@ import {
 import type { WarlockFamily } from "../warlock-family.ts";
 
 const VERSION = "5.3.0";
+/**
+ * The scope every pre-existing gate test ran under, now said out loud.
+ *
+ * These tests all mock `runZeroEditGeneratorGate` and assert on what reaches
+ * it, so they were always full-matrix runs — the difference is that the scope
+ * is no longer implicit. Spread into each gate call rather than defaulted in
+ * the runner: a default is exactly what canon `e00fb7b8` forbids, and a test
+ * helper that supplies one would hide the requirement from the tests meant to
+ * prove it.
+ */
+const FULL_MATRIX = {
+  matrixScope: "full",
+  matrixAuthorisation: {
+    authorisedBy: "Hasan",
+    date: "2026-09-07",
+    quote: "run the full matrix for this one",
+  },
+} as const;
 const HASH = "a".repeat(64);
 const FAMILY: WarlockFamily = {
   name: "warlock",
@@ -151,7 +171,7 @@ describe("runReleaseFamily gate mode", () => {
     });
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
       /does not equal the reconciled family version/,
     );
     assert.equal(control.commands.length, 0);
@@ -161,7 +181,7 @@ describe("runReleaseFamily gate mode", () => {
   it("lets one innocent candidate reach exactly one ordered handoff", async () => {
     const control = fixture();
     const handoff = await runReleaseFamily(
-      { mode: "gate", version: VERSION },
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
       control.dependencies,
     );
 
@@ -196,7 +216,7 @@ describe("runReleaseFamily gate mode", () => {
     });
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
       /generator red control failed/,
     );
 
@@ -241,7 +261,7 @@ describe("runReleaseFamily gate mode", () => {
     });
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
       /missing packed entry target \.\/esm\/index\.mjs/,
     );
     assert.equal(localGateCalls, 0);
@@ -255,7 +275,7 @@ describe("runReleaseFamily gate mode", () => {
     // local gate, proving the red result came from the shared packed-entry check.
     artifactEntries = [...validEntries];
     const handoff = await runReleaseFamily(
-      { mode: "gate", version: VERSION },
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
       control.dependencies,
     );
     assert.ok(handoff);
@@ -286,7 +306,7 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
 
   it("INNOCENT CASE: a clean workspace gates green and packs every member, exactly as today", async () => {
     const control = withGitStatus(new Map());
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
 
     assert.ok(handoff);
     const builds = control.commands.filter(command => command.args[1] === "build");
@@ -303,7 +323,7 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
     const control = withGitStatus(dirty);
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
       error => {
         const message = (error as Error).message;
         assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
@@ -334,7 +354,7 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
 
     // Revert: an all-clean tree for the same two members passes green again.
     const cleanControl = withGitStatus(new Map());
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, cleanControl.dependencies);
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
     assert.ok(handoff);
     assert.equal(cleanControl.handoffs.length, 1);
   });
@@ -353,7 +373,7 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
       assert.ok(handoff, "a surface-external dirty file must not block the release");
     } finally {
       console.warn = originalWarn;
@@ -423,7 +443,7 @@ describe("per-package own quality gate (test/typecheck)", () => {
     process.env.NODE_ENV = "production";
     try {
       const control = withPackageScripts(new Map());
-      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
 
       assert.ok(handoff);
       const runs = control.commands.filter(command => command.command === RESOLVED_MARKER);
@@ -461,7 +481,7 @@ describe("per-package own quality gate (test/typecheck)", () => {
     });
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
       error => {
         const message = (error as Error).message;
         assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
@@ -492,7 +512,7 @@ describe("per-package own quality gate (test/typecheck)", () => {
     // Restore: an all-green set of scripts for the same two members passes
     // green again.
     const cleanControl = withPackageScripts(new Map());
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, cleanControl.dependencies);
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
     assert.ok(handoff);
     assert.equal(cleanControl.handoffs.length, 1);
   });
@@ -508,7 +528,7 @@ describe("per-package own quality gate (test/typecheck)", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies);
+      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
       assert.ok(handoff, "a missing test script must not block the release");
     } finally {
       console.warn = originalWarn;
@@ -541,7 +561,7 @@ describe("per-package own quality gate (test/typecheck)", () => {
     });
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
       error => {
         const message = (error as Error).message;
         assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
@@ -702,6 +722,7 @@ describe("runReleaseFamily publish mode", () => {
         subjects: FAMILY.members.map(member => member.name),
         artifacts,
         verifiedAt: "2026-09-02T12:00:00.000Z",
+        matrixScope: "full",
       }),
       sha256File: async filePath => {
         events.push(`hash:${path.basename(filePath)}`);
@@ -819,7 +840,7 @@ describe("--reuse-artifacts", () => {
     });
 
     const handoff = await runReleaseFamily(
-      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      { mode: "gate", version: VERSION, ...FULL_MATRIX, reuseArtifacts: true },
       control.dependencies,
     );
 
@@ -836,7 +857,7 @@ describe("--reuse-artifacts", () => {
     });
 
     const handoff = await runReleaseFamily(
-      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      { mode: "gate", version: VERSION, ...FULL_MATRIX, reuseArtifacts: true },
       control.dependencies,
     );
 
@@ -855,7 +876,7 @@ describe("--reuse-artifacts", () => {
     });
 
     const handoff = await runReleaseFamily(
-      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      { mode: "gate", version: VERSION, ...FULL_MATRIX, reuseArtifacts: true },
       control.dependencies,
     );
 
@@ -869,7 +890,7 @@ describe("--reuse-artifacts", () => {
     const control = reuseFixture();
 
     const handoff = await runReleaseFamily(
-      { mode: "gate", version: VERSION, reuseArtifacts: true },
+      { mode: "gate", version: VERSION, ...FULL_MATRIX, reuseArtifacts: true },
       control.dependencies,
     );
 
@@ -888,41 +909,206 @@ describe("--reuse-artifacts", () => {
   });
 });
 
-describe("--only (subset gate run)", () => {
-  it(
-    "NEVER emits a publish handoff for a subset run, even when every selected row passes -- " +
-      "this is the guarantee that keeps --only from ever becoming how a release actually ships",
-    async () => {
-      const control = fixture();
-      await assert.rejects(
-        runReleaseFamily(
-          { mode: "gate", version: VERSION, only: ["create-warlock"] },
-          control.dependencies,
-        ),
-        /NEVER authorise a publish/,
-      );
-      assert.equal(control.handoffs.length, 0, "a subset run must never write a publish handoff");
-    },
-  );
-
-  it("threads --only through to the local gate as onlyFeatures, unexamined", async () => {
-    const control = fixture();
-    let seenOnly: readonly string[] | undefined;
+describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
+  /**
+   * The suite this replaced asserted that a `--only` run "can NEVER authorise
+   * a publish". That was a true statement about the code and, from 2026-09-07,
+   * a false one about the rules: the owner reversed it deliberately, having
+   * been shown the collision — three permitted answers, one of which could
+   * ship. A refusal the owner has lifted is not a safeguard; it is a trap
+   * somebody hits mid-release and routes around, which is the one outcome the
+   * refusal existed to prevent.
+   *
+   * What replaced it is a RECORD. All three scopes may publish; none of them
+   * may go unstated.
+   */
+  const captureScope = (control: ReturnType<typeof fixture>) => {
+    const seen: { scope?: string; only?: readonly string[] } = {};
     control.dependencies.runLocalGate = async input => {
-      seenOnly = input.onlyFeatures;
+      seen.scope = input.matrixScope;
+      seen.only = input.onlyFeatures;
       return {
         kind: "warlock-family-publish-handoff",
         candidateVersion: input.candidateVersion,
         artifacts: input.artifacts.map(artifact => ({ ...artifact })),
         verifiedAt: "2026-09-02T12:00:00.000Z",
+        matrixScope: input.matrixScope,
+        ...(input.onlyFeatures ? { matrixRows: [...input.onlyFeatures] } : {}),
       };
     };
+    return seen;
+  };
+
+  it("OBSERVATION 1 — a FULL run still emits a handoff and still publishes, unchanged", async () => {
+    const control = fixture();
+    const seen = captureScope(control);
+
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
+
+    assert.equal(seen.scope, "full");
+    assert.equal(seen.only, undefined);
+    assert.equal(control.handoffs.length, 1);
+    assert.equal((handoff as ReleaseHandoff).matrixScope, "full");
+  });
+
+  it("OBSERVATION 2 — a SUBSET run WITHOUT authorisation is refused, and the refusal names what is missing", async () => {
+    const control = fixture();
 
     await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION, only: ["web"] }, control.dependencies),
+      runReleaseFamily(
+        { mode: "gate", version: VERSION, matrixScope: "subset", only: ["create-warlock"] },
+        control.dependencies,
+      ),
+      /--authorised-by/,
     );
-    assert.deepEqual(seenOnly, ["web"]);
     assert.equal(control.handoffs.length, 0);
+  });
+
+  it("OBSERVATION 3 — a SUBSET run WITH authorisation now publishes, and the handoff records the rows that ran", async () => {
+    const control = fixture();
+    const seen = captureScope(control);
+
+    const handoff = (await runReleaseFamily(
+      {
+        mode: "gate",
+        version: VERSION,
+        matrixScope: "subset",
+        only: ["create-warlock"],
+        matrixAuthorisation: {
+  authorisedBy: "Hasan",
+  date: "2026-09-07",
+  quote: "run the create-warlock row only",
+},
+      },
+      control.dependencies,
+    )) as ReleaseHandoff;
+
+    assert.equal(seen.scope, "subset");
+    assert.deepEqual(seen.only, ["create-warlock"]);
+    assert.equal(control.handoffs.length, 1);
+    assert.equal(handoff.matrixScope, "subset");
+    assert.deepEqual(handoff.matrixRows, ["create-warlock"]);
+    assert.equal(handoff.matrixAuthorisation?.authorisedBy, "Hasan");
+  });
+
+  it("a NONE run publishes, needs no authorisation, and says so in the handoff", async () => {
+    const control = fixture();
+    const seen = captureScope(control);
+
+    const handoff = (await runReleaseFamily(
+      { mode: "gate", version: VERSION, matrixScope: "none" },
+      control.dependencies,
+    )) as ReleaseHandoff;
+
+    assert.equal(seen.scope, "none");
+    assert.equal(seen.only, undefined);
+    assert.equal(handoff.matrixScope, "none");
+    assert.equal(handoff.matrixRows, undefined);
+    assert.equal(handoff.matrixAuthorisation, undefined);
+  });
+
+  it("REFUSES a gate run that states no scope at all — the default is not 'none', it is a refusal", async () => {
+    const control = fixture();
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION }, control.dependencies),
+      /has not stated its generator-matrix scope/,
+    );
+    assert.equal(control.handoffs.length, 0);
+  });
+
+  it("REFUSES a subset with no rows, and a full or none that carries rows", async () => {
+    assert.throws(
+      () => assertMatrixScopeIsStated({ matrixScope: "subset", matrixAuthorisation: {
+  authorisedBy: "Hasan",
+  date: "2026-09-07",
+  quote: "run the create-warlock row only",
+} }),
+      /subset with no selection/,
+    );
+    assert.throws(
+      () =>
+        assertMatrixScopeIsStated({
+          matrixScope: "full",
+          only: ["web"],
+          matrixAuthorisation: {
+  authorisedBy: "Hasan",
+  date: "2026-09-07",
+  quote: "run the create-warlock row only",
+},
+        }),
+      /must not carry a row selection/,
+    );
+    assert.throws(
+      () => assertMatrixScopeIsStated({ matrixScope: "none", only: ["web"] }),
+      /must not carry a row selection/,
+    );
+  });
+
+  it("REFUSES an authorisation attached to 'none' — nobody has to authorise the default", () => {
+    assert.throws(
+      () => assertMatrixScopeIsStated({ matrixScope: "none", matrixAuthorisation: {
+  authorisedBy: "Hasan",
+  date: "2026-09-07",
+  quote: "run the create-warlock row only",
+} }),
+      /needs no authorisation/,
+    );
+  });
+
+  it("REFUSES a half-filled authorisation by naming the missing piece", () => {
+    assert.throws(
+      () =>
+        assertMatrixScopeIsStated({
+          matrixScope: "full",
+          matrixAuthorisation: { authorisedBy: "Hasan", date: "2026-09-07", quote: "" },
+        }),
+      /actual words/,
+    );
+    assert.throws(
+      () =>
+        assertMatrixScopeIsStated({
+          matrixScope: "full",
+          matrixAuthorisation: { authorisedBy: "Hasan", date: "07/09/2026", quote: "go" },
+        }),
+      /ISO date/,
+    );
+  });
+
+  it("parses the scope and the authorisation off the command line", () => {
+    const parsed = parseArguments([
+      "gate",
+      "--version",
+      VERSION,
+      "--matrix",
+      "subset",
+      "--only",
+      "web,composed",
+      "--authorised-by",
+      "Hasan",
+      "--authorisation-date",
+      "2026-09-07",
+      "--authorisation",
+      "just those two rows",
+    ]);
+
+    assert.equal(parsed.matrixScope, "subset");
+    assert.deepEqual(parsed.only, ["web", "composed"]);
+    assert.deepEqual(parsed.matrixAuthorisation, {
+      authorisedBy: "Hasan",
+      date: "2026-09-07",
+      quote: "just those two rows",
+    });
+  });
+
+  it("refuses an unknown --matrix value rather than guessing at it", () => {
+    assert.throws(
+      () => parseArguments(["gate", "--version", VERSION, "--matrix", "some"]),
+      /must be one of none \| subset \| full/,
+    );
   });
 });
 

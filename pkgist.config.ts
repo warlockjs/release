@@ -404,12 +404,22 @@ export default defineConfig({
            * deliberately separate so a consumer's production graph never pulls
            * the dev-only Vite plugin or the connector in behind a bare import.
            *
-           * `hydration/index.ts` is the HYDRATION ENTRY and is not imported by any
+           * `entry/index.ts` is the HYDRATION ENTRY and is not imported by any
            * consumer — `warlock build` feeds it to Vite as a build input. It is
            * built here because the build previously resolved it to
-           * `<webRoot>/src/hydration/index.ts`, a path that exists only in this
+           * `<webRoot>/src/entry/index.ts`, a path that exists only in this
            * checkout: with `"files": ["esm"]`, no installed copy has `src/`, so
            * the client bundle could not be produced by any real consumer.
+           *
+           * The path is `entry/`, not `hydration/`, and this list is the ONLY
+           * thing that has to be kept in step with that name by hand. `web`
+           * `b4d3d71` renamed the folder; this entry was not renamed with it,
+           * and `@warlock.js/web` stopped building at all —
+           * `[UNRESOLVED_ENTRY] Cannot resolve entry module ../web/src/hydration/index.ts`.
+           * It went unnoticed because the only gate that builds the family
+           * OOM'd (canon `ccd02104`) before it ever reached `web`. The runtime
+           * half already agrees: `vite/hydration-entries.ts` looks for
+           * `esm/entry/index.mjs`, falling back to `src/entry/index.ts`.
            *
            * `server/index.ts` is the PIPELINE SEAM and is likewise imported by
            * nobody — the dev connector reaches it through
@@ -425,7 +435,7 @@ export default defineConfig({
            */
           entries: [
             "index.ts",
-            "hydration/index.ts",
+            "entry/index.ts",
             "server/index.ts",
             "client/runtime/index.ts",
             "connector/index.ts",
