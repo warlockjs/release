@@ -1,0 +1,38 @@
+{
+  // Strictness ratchet baseline, re-measured on 2026-09-09 with:
+  // `node --import tsx builder/scripts/strictness-gate.ts`
+  // Every package keeps its own config for resolution and file inclusion, while
+  // the tsconfig.base.json strictness contract is enforced for every compile.
+  // The resulting rise for formerly lenient packages is truth arriving, not a
+  // regression. From this re-seeded baseline, these numbers may only go DOWN.
+  // `builder` has no TypeScript config, so it is unmeasured, not zero.
+  "access": 1,
+  "ai": 463,
+  "ai-anthropic": 47,
+  "ai-bedrock": 44,
+  "ai-deepseek": 0,
+  "ai-google": 49,
+  "ai-groq": 0,
+  "ai-live": 1,
+  "ai-mistral": 0,
+  "ai-ollama": 30,
+  "ai-openai": 73,
+  "ai-panoptic": 61,
+  "ai-tools": 69,
+  "ai-workspace": 19,
+  "ai-xai": 0,
+  "auth": 22,
+  "cache": 22,
+  "cascade": 59,
+  "context": 0,
+  "core": 119,
+  "create-warlock": 9,
+  "docs": 18,
+  "fs": 1,
+  "herald": 0,
+  "logger": 9,
+  "notifications": 0,
+  "scheduler": 23,
+  "seal": 0,
+  "web": 186
+}
