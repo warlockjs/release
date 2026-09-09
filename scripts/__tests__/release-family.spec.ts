@@ -105,8 +105,16 @@ function fixture(
     }),
     runCommand: async request => {
       commands.push(request);
+      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] === "--abbrev-ref") {
+        // Innocent case: every member is checked out on the same branch
+        // origin's default resolves to below.
+        return { stdout: "main\n", stderr: "" };
+      }
       if (request.command === "git" && request.args[0] === "rev-parse") {
         return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
+      }
+      if (request.command === "git" && request.args[0] === "ls-remote" && request.args[1] === "--symref") {
+        return { stdout: `ref: refs/heads/main\tHEAD\n${"a".repeat(40)}\tHEAD\n`, stderr: "" };
       }
       if (request.args[1] === "pack") {
         const sourceDirectory = request.args[2];
@@ -731,7 +739,7 @@ describe("per-member release commit (card D1a)", () => {
     const baseRunCommand = control.dependencies.runCommand!;
     const revCounts = new Map<string, number>();
     control.dependencies.runCommand = async request => {
-      if (request.command === "git" && request.args[0] === "rev-parse") {
+      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] !== "--abbrev-ref") {
         control.commands.push(request);
         const count = (revCounts.get(request.cwd) ?? 0) + 1;
         revCounts.set(request.cwd, count);
@@ -904,6 +912,190 @@ describe("per-member release commit (card D1a)", () => {
     const cleanControl = commitFixture();
     const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
     assert.ok(handoff);
+  });
+});
+
+describe("per-member remote-default-branch gate (the create-warlock / parked-branch defect)", () => {
+  const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications"
+  const createWarlockRoot = FAMILY.members[1].root; // "create-warlock"
+
+  /**
+   * `branchesByRoot` fakes each member's own checked-out branch
+   * (`git rev-parse --abbrev-ref HEAD`); `defaultsByRoot` fakes what origin's
+   * `git ls-remote --symref origin HEAD` reports as the default. A root
+   * mapped to `null` in `defaultsByRoot` fakes an unresolvable answer (no
+   * parseable "ref:" line) rather than a resolved-but-different one.
+   */
+  function withBranches(
+    branchesByRoot: ReadonlyMap<string, string>,
+    defaultsByRoot: ReadonlyMap<string, string | null>,
+  ): ReturnType<typeof fixture> {
+    const control = fixture();
+    const baseRunCommand = control.dependencies.runCommand!;
+    control.dependencies.runCommand = async request => {
+      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] === "--abbrev-ref") {
+        control.commands.push(request);
+        return { stdout: `${branchesByRoot.get(request.cwd) ?? "main"}\n`, stderr: "" };
+      }
+      if (request.command === "git" && request.args[0] === "ls-remote" && request.args[1] === "--symref") {
+        control.commands.push(request);
+        const value = defaultsByRoot.has(request.cwd) ? defaultsByRoot.get(request.cwd) : "main";
+        if (value === null || value === undefined) return { stdout: "", stderr: "" };
+        return { stdout: `ref: refs/heads/${value}\tHEAD\n${"a".repeat(40)}\tHEAD\n`, stderr: "" };
+      }
+      return await baseRunCommand(request);
+    };
+    return control;
+  }
+
+  it("INNOCENT CASE: a member checked out on origin's default branch passes and is otherwise untouched", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+    );
+
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+
+    assert.ok(handoff);
+    assert.equal(
+      control.commands.filter(command => command.args[1] === "build").length,
+      FAMILY.members.length,
+    );
+    assert.equal(
+      control.commands.filter(command => command.args[1] === "pack").length,
+      FAMILY.members.length,
+    );
+  });
+
+  it("passes a member checked out on origin's ACTUAL resolved default, even when that default is not \"main\" (never a hardcoded name)", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "trunk"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "trunk"]]),
+    );
+
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+
+    assert.ok(handoff, "checked out on origin's own resolved default -- must pass even though it isn't \"main\"");
+    const cwPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(cwPacks.length, 1);
+  });
+
+  it("refuses a member parked on a non-default branch, naming the member and BOTH branches", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "fix/scaffold-npm-arborist"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+    );
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+      (error: Error) => {
+        assert.match(error.message, /create-warlock/);
+        assert.match(error.message, /fix\/scaffold-npm-arborist/);
+        assert.match(error.message, /main/);
+        return true;
+      },
+    );
+  });
+
+  it("one member refused on branch does not stop the others: they still build and pack, and the run throws once at the end", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "fix/scaffold-npm-arborist"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+    );
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+    );
+
+    const cwBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "create-warlock",
+    );
+    assert.equal(cwBuilds.length, 0, "the refused member must never be built");
+
+    const notifBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+    );
+    const notifPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+    );
+    assert.equal(notifBuilds.length, 1, "the unaffected sibling must still build");
+    assert.equal(notifPacks.length, 1, "the unaffected sibling must still pack");
+    assert.equal(control.handoffs.length, 0, "a refused member must never reach a handoff");
+  });
+
+  it("an explicit --allow-branch opt-in genuinely permits the deliberate branch release, and REPORTS its use", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "fix/scaffold-npm-arborist"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+    );
+    const reported: string[] = [];
+    control.dependencies.report = line => reported.push(line);
+
+    const handoff = await runReleaseFamily(
+      {
+        mode: "gate",
+        version: VERSION,
+        ...FULL_MATRIX,
+        allowNonDefaultBranchFor: ["create-warlock"],
+      },
+      control.dependencies,
+    );
+
+    assert.ok(handoff, "the opt-in must let the deliberate branch release through");
+    const cwPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(cwPacks.length, 1, "the explicitly overridden member must still build and pack");
+
+    const overrideLine = reported.find(line => line.includes("BRANCH OVERRIDE") && line.includes("create-warlock"));
+    assert.ok(overrideLine, "the override must be reported in the run output");
+    assert.match(overrideLine!, /fix\/scaffold-npm-arborist/);
+    assert.match(overrideLine!, /main/);
+  });
+
+  it("REFUSES rather than passes when origin's default branch cannot be resolved at all", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, null]]),
+    );
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+      (error: Error) => {
+        assert.match(error.message, /create-warlock/);
+        assert.match(error.message, /could not resolve origin's default branch/);
+        return true;
+      },
+    );
+    const cwPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(cwPacks.length, 0, "an unresolvable default must never be treated as a pass");
+  });
+
+  it("records BOTH the checked-out branch and origin's default branch in provenance", async () => {
+    const control = withBranches(
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+    );
+    let capturedProvenance: unknown;
+    control.dependencies.writeTextFile = async (filePath, contents) => {
+      if (path.basename(filePath) === "build-provenance.json") capturedProvenance = JSON.parse(contents);
+    };
+
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff);
+
+    const provenance = capturedProvenance as {
+      members: Array<{ name: string; checkedOutBranch: string; remoteDefaultBranch: string }>;
+    };
+    assert.ok(provenance, "provenance must be written");
+    for (const entry of provenance.members) {
+      assert.equal(entry.checkedOutBranch, "main");
+      assert.equal(entry.remoteDefaultBranch, "main");
+    }
   });
 });
 
@@ -1175,7 +1367,7 @@ describe("--reuse-artifacts", () => {
 
     const baseRunCommand = control.dependencies.runCommand!;
     control.dependencies.runCommand = async request => {
-      if (request.command === "git" && request.args[0] === "rev-parse") {
+      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] !== "--abbrev-ref") {
         control.commands.push(request);
         const recorded = request.cwd === notificationsRoot ? RECORDED_HEAD_NOTIF : RECORDED_HEAD_CW;
         const head = options.headsByRoot?.get(request.cwd) ?? recorded;

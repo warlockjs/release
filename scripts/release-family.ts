@@ -108,6 +108,20 @@ export interface ReleaseOptions {
    * everywhere else (canon `09374678`).
    */
   matrixAuthorisation?: MatrixAuthorisation;
+  /**
+   * Opt-in: permit specific family members to release from whatever branch
+   * they are currently checked out on, even though it differs from origin's
+   * resolved default branch.
+   *
+   * Named per member, not a blanket boolean -- the defect this exists to fix
+   * is a member sitting on the wrong branch with nobody noticing, so the
+   * override itself must say exactly which member(s) it covers rather than
+   * silently waiving the check for all 28. Threaded from an explicit CLI
+   * flag (`--allow-branch <name>`, repeatable): per run and visible, never an
+   * ambient setting a later run inherits by accident. Every member named
+   * here is REPORTED as an override in the run output when it is used.
+   */
+  allowNonDefaultBranchFor?: readonly string[];
 }
 
 /**
@@ -140,6 +154,17 @@ export interface BuildProvenanceEntry {
   releaseCommitSha: string;
   /** Full `git status --porcelain` for that package's repo, captured at build time -- not scoped to the published surface. */
   gitDirtyEntries: readonly DirtyPathEntry[];
+  /** The branch this member's own repo was checked out on when it was built -- see `remoteDefaultBranch`. */
+  checkedOutBranch: string;
+  /**
+   * Origin's default branch for this member's repo, resolved with
+   * `git ls-remote --symref origin HEAD` -- never hardcoded, never guessed
+   * from a fixed list, since these are 28 independent repositories. Recorded
+   * alongside `checkedOutBranch` so a later phase (the confirm/tag-and-push
+   * step) never has to re-derive the fact that gated this build; it reads it
+   * back exactly as it already reads `releaseCommitSha`.
+   */
+  remoteDefaultBranch: string;
   builtAt: string;
 }
 
@@ -252,6 +277,7 @@ export async function runReleaseFamily(
       matrixScope: assertMatrixScopeIsStated(options),
       only: options.only,
       matrixAuthorisation: options.matrixAuthorisation,
+      allowNonDefaultBranchFor: options.allowNonDefaultBranchFor,
     });
   }
 
@@ -279,6 +305,7 @@ export interface PrepareAndGateOptions {
   matrixScope?: MatrixScope;
   only?: readonly string[];
   matrixAuthorisation?: MatrixAuthorisation;
+  allowNonDefaultBranchFor?: readonly string[];
 }
 
 /**
@@ -423,7 +450,13 @@ async function prepareAndGate(
   }
 
   if (!artifacts) {
-    const built = await buildAndPackAllMembers(family, version, artifactDirectory, runtime);
+    const built = await buildAndPackAllMembers(
+      family,
+      version,
+      artifactDirectory,
+      runtime,
+      options.allowNonDefaultBranchFor ?? [],
+    );
     artifacts = built.artifacts;
     if (built.provenance.length > 0) {
       await writeProvenance(artifactDirectory, version, built.provenance, runtime);
@@ -468,13 +501,16 @@ async function buildAndPackAllMembers(
   version: string,
   artifactDirectory: string,
   runtime: Runtime,
+  allowNonDefaultBranchFor: readonly string[] = [],
 ): Promise<{ artifacts: CandidateArtifact[]; provenance: BuildProvenanceEntry[] }> {
   const artifacts: CandidateArtifact[] = [];
   const provenance: BuildProvenanceEntry[] = [];
   const dirtyTreeRefusals: string[] = [];
   const qualityRefusals: string[] = [];
+  const branchRefusals: string[] = [];
   const lockfileRefusals: string[] = [];
   const commitRefusals: string[] = [];
+  const allowedBranchOverrides = new Set(allowNonDefaultBranchFor);
 
   for (const member of family.members) {
     // Adjacent to the pack, per-member, not a sweep somewhere upstream: a
@@ -501,6 +537,28 @@ async function buildAndPackAllMembers(
     if (!quality.passed) {
       qualityRefusals.push(quality.refusalMessage);
       continue;
+    }
+
+    // A release pushes to whatever branch a member's own repo is parked on
+    // (see `tagAndPushMember`) -- these are 28 independent repositories, so
+    // nothing here may hardcode or guess a default branch name. Checked here,
+    // adjacent to the other per-member gates and BEFORE this member's tree is
+    // touched, so a member parked off its default branch refuses alone, at
+    // the gate, instead of tagging and pushing to the wrong place after
+    // publication -- which is exactly what happened to `create-warlock`
+    // (measured parked on `fix/scaffold-npm-arborist`) and would have passed
+    // every other check unnoticed.
+    const branchCheck = await checkPackageBranchMatchesOrigin(member, allowedBranchOverrides, runtime);
+    if (!branchCheck.passed) {
+      branchRefusals.push(branchCheck.refusalMessage);
+      continue;
+    }
+    if (branchCheck.overridden) {
+      runtime.report(
+        `[release-family] BRANCH OVERRIDE (--allow-branch ${member.name}): checked out on ` +
+          `"${branchCheck.checkedOutBranch}", not origin's default "${branchCheck.remoteDefaultBranch}" -- ` +
+          "releasing anyway, explicitly authorised for this run.",
+      );
     }
 
     // Captured BEFORE `pkgist build` touches this member's tree, so it stays
@@ -580,6 +638,8 @@ async function buildAndPackAllMembers(
       gitHead,
       releaseCommitSha: commit.sha,
       gitDirtyEntries: [...cleanliness.dirtyInSurface, ...cleanliness.waivedOutsideSurface],
+      checkedOutBranch: branchCheck.checkedOutBranch,
+      remoteDefaultBranch: branchCheck.remoteDefaultBranch,
       builtAt: runtime.now().toISOString(),
     });
   }
@@ -587,6 +647,7 @@ async function buildAndPackAllMembers(
   if (
     dirtyTreeRefusals.length > 0 ||
     qualityRefusals.length > 0 ||
+    branchRefusals.length > 0 ||
     lockfileRefusals.length > 0 ||
     commitRefusals.length > 0
   ) {
@@ -594,7 +655,9 @@ async function buildAndPackAllMembers(
     // `continue`s above) — this refuses the release as a whole only now,
     // after every member has had its own independent chance, never before.
     throw new Error(
-      [...dirtyTreeRefusals, ...qualityRefusals, ...lockfileRefusals, ...commitRefusals].join("\n\n"),
+      [...dirtyTreeRefusals, ...qualityRefusals, ...branchRefusals, ...lockfileRefusals, ...commitRefusals].join(
+        "\n\n",
+      ),
     );
   }
 
@@ -1014,6 +1077,96 @@ export async function checkPackageOwnQuality(
   ].join("\n");
 
   return { passed: false, refusalMessage, skipped };
+}
+
+export interface PackageBranchResult {
+  passed: boolean;
+  refusalMessage: string;
+  checkedOutBranch: string;
+  remoteDefaultBranch: string;
+  /** True when the branches differ but this run explicitly authorised it for this member. */
+  overridden: boolean;
+}
+
+/**
+ * Prove that this member's checked-out branch is origin's default branch --
+ * or that this run explicitly authorised releasing it from wherever it is
+ * parked -- immediately before it is built and packed.
+ *
+ * `tagAndPushMember` reads each member's checked-out branch per repo and
+ * pushes there, correctly: these are 28 independent repositories and
+ * hardcoding "main" would be the wrong rule. But nothing previously checked
+ * that branch AGAINST anything, so a member parked off its default branch
+ * (measured for real: `create-warlock` on `fix/scaffold-npm-arborist`, all 27
+ * others on `main`/`master`) would tag and push the release there instead --
+ * discovered only after publication, because every other check (clean tree,
+ * correct sha, genuine ancestor, package live at the origin) still passes
+ * against the wrong branch just as well as the right one.
+ *
+ * Refusing here, at the gate, is a control; refusing at the push (as
+ * `tagAndPushMember` already does for a divergent origin tip) is an apology
+ * that arrives after the release is already public.
+ */
+export async function checkPackageBranchMatchesOrigin(
+  member: WarlockFamilyMember,
+  allowedOverrides: ReadonlySet<string>,
+  runtime: Runtime,
+): Promise<PackageBranchResult> {
+  let checkedOutBranch: string;
+  try {
+    checkedOutBranch = await resolveMemberBranch(member, runtime);
+  } catch (error) {
+    return {
+      passed: false,
+      refusalMessage: [
+        `Refusing to release ${member.name}: cannot resolve its checked-out branch.`,
+        `Package root: ${member.root}`,
+        formatError(error),
+      ].join("\n"),
+      checkedOutBranch: "",
+      remoteDefaultBranch: "",
+      overridden: false,
+    };
+  }
+
+  const remoteDefaultBranch = await resolveOriginDefaultBranch(member, runtime);
+  if (!remoteDefaultBranch) {
+    return {
+      passed: false,
+      refusalMessage: [
+        `Refusing to release ${member.name}: could not resolve origin's default branch.`,
+        `Package root: ${member.root}`,
+        `Checked-out branch: ${checkedOutBranch}`,
+        '"git ls-remote --symref origin HEAD" (asking the remote directly, never a local cache) ' +
+          "returned no parseable \"ref: refs/heads/<name>\\tHEAD\" line.",
+        "An unresolvable default is refused, never assumed.",
+      ].join("\n"),
+      checkedOutBranch,
+      remoteDefaultBranch: "",
+      overridden: false,
+    };
+  }
+
+  if (checkedOutBranch === remoteDefaultBranch) {
+    return { passed: true, refusalMessage: "", checkedOutBranch, remoteDefaultBranch, overridden: false };
+  }
+
+  if (allowedOverrides.has(member.name)) {
+    return { passed: true, refusalMessage: "", checkedOutBranch, remoteDefaultBranch, overridden: true };
+  }
+
+  const refusalMessage = [
+    `Refusing to release ${member.name}: it is checked out on "${checkedOutBranch}", but origin's ` +
+      `default branch is "${remoteDefaultBranch}".`,
+    `Package root: ${member.root}`,
+    `A release tags and pushes to whatever branch a member's own repo is parked on -- releasing ` +
+      `here would tag and push to "${checkedOutBranch}" instead of "${remoteDefaultBranch}", and every ` +
+      `other check (clean tree, own quality, genuine ancestor, package live at the origin) would still pass.`,
+    `Fix: check out "${remoteDefaultBranch}" in ${member.name}'s own repository before releasing this ` +
+      `family, or pass --allow-branch ${member.name} to explicitly authorise this deliberate branch release.`,
+  ].join("\n");
+
+  return { passed: false, refusalMessage, checkedOutBranch, remoteDefaultBranch, overridden: false };
 }
 
 /** The one lockfile name this checks for; a member with no file by this name is left untouched. */
@@ -1621,6 +1774,39 @@ async function resolveMemberBranch(member: WarlockFamilyMember, runtime: Runtime
     throw new Error(`Cannot resolve a branch for ${member.name}: HEAD is detached (got "${branch}").`);
   }
   return branch;
+}
+
+/**
+ * Ask the remote what its default branch is -- never hardcode a name, never
+ * guess from a fixed list ("main", "master", ...). These are 28 independent
+ * repositories; a hardcoded guess is exactly the wrong rule this check exists
+ * to avoid.
+ *
+ * `git symbolic-ref refs/remotes/origin/HEAD` is only a LOCAL cache of the
+ * answer: it can be unset (never recorded by a plain clone) or stale (set
+ * once, never refreshed if the remote's default branch later changes), and
+ * this file already refuses to trust a local cache for origin state --
+ * `resolveOriginRefSha` above uses `ls-remote` for the same reason, recorded
+ * in canon `75a5376f`: a stale remote-tracking ref reports success while
+ * being frozen. `git ls-remote --symref origin HEAD` asks the remote
+ * directly and requires no local fetch.
+ *
+ * Returns `undefined` when the answer cannot be resolved -- the caller
+ * refuses on that, it never assumes a default.
+ */
+async function resolveOriginDefaultBranch(
+  member: WarlockFamilyMember,
+  runtime: Runtime,
+): Promise<string | undefined> {
+  const result = await runtime.runCommand({
+    command: "git",
+    args: ["ls-remote", "--symref", "origin", "HEAD"],
+    cwd: member.root,
+    env: { ...process.env },
+  });
+  const symrefLine = result.stdout.split(/\r?\n/).find(line => line.startsWith("ref:"));
+  const match = symrefLine?.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/);
+  return match?.[1];
 }
 
 /** The commit a remote ref (a branch or a tag) currently points at, or undefined when the ref does not exist at origin. Never requires a local fetch. */
@@ -2373,6 +2559,7 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
   let authorisedBy: string | undefined;
   let authorisationDate: string | undefined;
   let authorisationQuote: string | undefined;
+  const allowNonDefaultBranchFor: string[] = [];
   for (let index = 0; index < values.length; index += 1) {
     const argument = values[index];
     if (argument === "--version") version = values[++index] ?? "";
@@ -2390,6 +2577,9 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     else if (argument.startsWith("--authorisation-date=")) authorisationDate = argument.slice("--authorisation-date=".length);
     else if (argument === "--authorisation") authorisationQuote = values[++index];
     else if (argument.startsWith("--authorisation=")) authorisationQuote = argument.slice("--authorisation=".length);
+    // Repeatable and per-member on purpose: see `ReleaseOptions.allowNonDefaultBranchFor`.
+    else if (argument === "--allow-branch") allowNonDefaultBranchFor.push(values[++index] ?? "");
+    else if (argument.startsWith("--allow-branch=")) allowNonDefaultBranchFor.push(argument.slice("--allow-branch=".length));
     else throw new Error(`Unknown release-family argument: ${argument}.`);
   }
   assertExactVersion(version);
@@ -2414,6 +2604,7 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     matrixScope,
     only,
     matrixAuthorisation,
+    allowNonDefaultBranchFor: allowNonDefaultBranchFor.length > 0 ? allowNonDefaultBranchFor : undefined,
   };
 }
 
