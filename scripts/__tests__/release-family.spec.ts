@@ -87,6 +87,10 @@ function fixture(
     },
     resolvePkgistCli: () => path.resolve("pkgist", "dist", "cli.js"),
     resolveNpmCli: () => path.resolve("npm", "bin", "npm-cli.js"),
+    resolvePnpmCli: () => path.resolve("pnpm", "bin", "pnpm.mjs"),
+    // Default innocent case: no member has a lockfile, so nothing new fires.
+    // Tests that DO care about the lockfile step override this.
+    fileExists: async () => false,
     // Default stand-in: every quality-check script "resolves" and its run is
     // handled by the base runCommand stub below (which answers everything
     // with an empty success), so tests unrelated to the own-quality gate see
@@ -572,6 +576,134 @@ describe("per-package own quality gate (test/typecheck)", () => {
     );
     const runCommands = control.commands.filter(command => command.args[1] === "run");
     assert.equal(runCommands.length, 0, "must never fall back to shelling `npm run`/`npx`");
+  });
+});
+
+describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)", () => {
+  const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications" — no lockfile
+  const createWarlockRoot = FAMILY.members[1].root; // "create-warlock" — has one
+
+  const PNPM_MARKER = path.resolve("pnpm", "bin", "pnpm.mjs");
+
+  function lockfileFixture(
+    outcomes: {
+      lockfileOnly?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
+      frozenInstall?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
+    } = {},
+  ): ReturnType<typeof fixture> {
+    const control = fixture({
+      // Only create-warlock carries a lockfile.
+      fileExists: async filePath => path.basename(filePath) === "pnpm-lock.yaml"
+        && path.dirname(filePath) === createWarlockRoot,
+    });
+    const baseRunCommand = control.dependencies.runCommand!;
+    control.dependencies.runCommand = async request => {
+      if (request.args[0] === PNPM_MARKER && request.args[1] === "install") {
+        control.commands.push(request);
+        const isFrozen = request.args.includes("--frozen-lockfile");
+        const outcome = isFrozen
+          ? (outcomes.frozenInstall?.(request) ?? { stdout: "", stderr: "" })
+          : (outcomes.lockfileOnly?.(request) ?? { stdout: "", stderr: "" });
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      }
+      return await baseRunCommand(request);
+    };
+    return control;
+  }
+
+  function lockfileCommandsFor(control: ReturnType<typeof fixture>, root: string): CommandRequest[] {
+    return control.commands.filter(
+      command => command.args[0] === PNPM_MARKER && command.cwd === root,
+    );
+  }
+
+  it("a member WITH a lockfile gets regenerated then frozen-lockfile-checked, after its build and before its pack", async () => {
+    const control = lockfileFixture();
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff);
+
+    const cwCommands = control.commands.filter(
+      command =>
+        (command.args[1] === "build" && command.args[2] === "create-warlock") ||
+        command.args[0] === PNPM_MARKER ||
+        (command.args[1] === "pack" && String(command.args[2]).includes("create-warlock")),
+    );
+    const orderedKinds = cwCommands.map(command => {
+      if (command.args[1] === "build") return "build";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--lockfile-only")) return "lockfile-only";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--frozen-lockfile")) return "frozen-lockfile";
+      if (command.args[1] === "pack") return "pack";
+      return "other";
+    });
+
+    assert.deepEqual(orderedKinds, ["build", "lockfile-only", "frozen-lockfile", "pack"]);
+
+    const pnpmCommands = lockfileCommandsFor(control, createWarlockRoot);
+    assert.equal(pnpmCommands.length, 2);
+    assert.ok(pnpmCommands.every(command => command.command === process.execPath));
+    assert.ok(pnpmCommands.every(command => command.args[0] === PNPM_MARKER));
+    // Never through npx/pnpm exec.
+    assert.ok(control.commands.every(command => command.command !== "npx"));
+    assert.ok(control.commands.every(command => !command.args.includes("exec")));
+  });
+
+  it("a member WITHOUT a lockfile gets neither regeneration nor the frozen-lockfile check, and is otherwise untouched", async () => {
+    const control = lockfileFixture();
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff);
+
+    assert.equal(lockfileCommandsFor(control, notificationsRoot).length, 0);
+    const notifBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+    );
+    const notifPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+    );
+    assert.equal(notifBuilds.length, 1);
+    assert.equal(notifPacks.length, 1);
+  });
+
+  it("RED CONTROL: a failing frozen-lockfile check refuses THAT member alone; others still build; the run throws once", async () => {
+    const control = lockfileFixture({
+      frozenInstall: () =>
+        new Error(
+          `${process.execPath} exited 1: ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with "frozen-lockfile" ` +
+            "because pnpm-lock.yaml is not up to date with package.json",
+        ),
+    });
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+      error => {
+        const message = (error as Error).message;
+        assert.match(message, /Refusing to pack create-warlock/);
+        assert.match(message, /regenerated lockfile does not agree with its rewritten manifest/);
+        assert.match(message, /ERR_PNPM_OUTDATED_LOCKFILE/);
+        return true;
+      },
+    );
+
+    // The failing member was never packed.
+    const cwPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(cwPacks.length, 0, "member whose lockfile disagrees must not be packed");
+
+    // The other, unaffected member still built and packed.
+    const notifBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+    );
+    const notifPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+    );
+    assert.equal(notifBuilds.length, 1, "unaffected sibling must still build");
+    assert.equal(notifPacks.length, 1, "unaffected sibling must still pack");
+
+    // Restore: an agreeing lockfile passes green again.
+    const cleanControl = lockfileFixture();
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
+    assert.ok(handoff);
   });
 });
 

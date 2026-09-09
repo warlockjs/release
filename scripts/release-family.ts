@@ -172,6 +172,7 @@ export interface ReleaseFamilyDependencies {
   sha256File?(filePath: string): Promise<string>;
   resolvePkgistCli?(): string;
   resolveNpmCli?(): string;
+  resolvePnpmCli?(): string;
   /**
    * Turn one package.json script's command text into a directly-invocable
    * binary + args, resolved from that package's own (or an ancestor's)
@@ -448,6 +449,7 @@ async function buildAndPackAllMembers(
   const provenance: BuildProvenanceEntry[] = [];
   const dirtyTreeRefusals: string[] = [];
   const qualityRefusals: string[] = [];
+  const lockfileRefusals: string[] = [];
 
   for (const member of family.members) {
     // Adjacent to the pack, per-member, not a sweep somewhere upstream: a
@@ -493,6 +495,19 @@ async function buildAndPackAllMembers(
       env: { ...process.env },
     });
 
+    // Same call site, same shape again: `pkgist build` just rewrote THIS
+    // member's package.json in the working tree -- its version and its exact
+    // intra-family pins -- and any lockfile that member carries now describes
+    // a manifest that no longer exists. Checked here, immediately after the
+    // rewrite and before this member is packed, so a stale lockfile refuses
+    // ONLY this member; a sweep afterwards could regenerate a lockfile that
+    // then goes stale again before it is ever packed.
+    const lockfile = await regenerateMemberLockfile(member, runtime);
+    if (!lockfile.passed) {
+      lockfileRefusals.push(lockfile.refusalMessage);
+      continue;
+    }
+
     const buildDirectory = path.join(BUILD_ROOT, ...member.name.split("/"), version);
     const packed = await runtime.runCommand({
       command: process.execPath,
@@ -529,11 +544,11 @@ async function buildAndPackAllMembers(
     });
   }
 
-  if (dirtyTreeRefusals.length > 0 || qualityRefusals.length > 0) {
-    // Every clean, green member above still built and packed (see the two
+  if (dirtyTreeRefusals.length > 0 || qualityRefusals.length > 0 || lockfileRefusals.length > 0) {
+    // Every clean, green member above still built and packed (see the
     // `continue`s above) — this refuses the release as a whole only now,
     // after every member has had its own independent chance, never before.
-    throw new Error([...dirtyTreeRefusals, ...qualityRefusals].join("\n\n"));
+    throw new Error([...dirtyTreeRefusals, ...qualityRefusals, ...lockfileRefusals].join("\n\n"));
   }
 
   return { artifacts, provenance };
@@ -952,6 +967,89 @@ export async function checkPackageOwnQuality(
   ].join("\n");
 
   return { passed: false, refusalMessage, skipped };
+}
+
+/** The one lockfile name this checks for; a member with no file by this name is left untouched. */
+const PNPM_LOCKFILE_NAME = "pnpm-lock.yaml";
+
+export interface LockfileRegenerationResult {
+  /** False when the member has no lockfile at all -- nothing to do, and not a failure. */
+  regenerated: boolean;
+  passed: boolean;
+  refusalMessage: string;
+}
+
+/**
+ * Regenerate a family member's own lockfile immediately after `pkgist build`
+ * rewrites that member's `package.json`, and prove the two agree before this
+ * member is packed.
+ *
+ * Keyed off whether a `pnpm-lock.yaml` exists at the member's own root, never
+ * off the member's name: `pkgist build` rewrites every member's manifest --
+ * its version and its exact intra-family pins -- and ANY member that also
+ * carries its own lockfile has just had that lockfile's promises broken by a
+ * rewrite it never saw. `create-warlock` is the one member with a lockfile
+ * today (it doubles as an independently CI'd repository), but a rule that
+ * named it by name would miss the next one exactly the way this defect
+ * shipped in 5.6.0: `@warlock.js/fs` was rewritten to an exact `5.6.0` while
+ * `create-warlock`'s lockfile still resolved `^5.1.0`, and
+ * `pnpm install --frozen-lockfile` -- what its CI actually runs -- refused
+ * every run from the moment 5.6.0 published, for a reason no source change
+ * could explain.
+ *
+ * The proof is that same real command, `pnpm install --frozen-lockfile`,
+ * never a structural diff of lockfile against manifest -- a check that
+ * cannot execute its subject is not a check.
+ */
+export async function regenerateMemberLockfile(
+  member: WarlockFamilyMember,
+  runtime: Runtime,
+): Promise<LockfileRegenerationResult> {
+  const lockfilePath = path.join(member.root, PNPM_LOCKFILE_NAME);
+  if (!(await runtime.fileExists(lockfilePath))) {
+    return { regenerated: false, passed: true, refusalMessage: "" };
+  }
+
+  try {
+    await runtime.runCommand({
+      command: process.execPath,
+      args: [runtime.resolvePnpmCli(), "install", "--lockfile-only"],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+  } catch (error) {
+    return {
+      regenerated: false,
+      passed: false,
+      refusalMessage: [
+        `Refusing to pack ${member.name}: its lockfile could not be regenerated after pkgist rewrote its manifest.`,
+        `Package root: ${member.root}`,
+        `pnpm install --lockfile-only: ${formatError(error)}`,
+      ].join("\n"),
+    };
+  }
+
+  try {
+    await runtime.runCommand({
+      command: process.execPath,
+      args: [runtime.resolvePnpmCli(), "install", "--frozen-lockfile"],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+  } catch (error) {
+    return {
+      regenerated: true,
+      passed: false,
+      refusalMessage: [
+        `Refusing to pack ${member.name}: its regenerated lockfile does not agree with its rewritten manifest.`,
+        `Package root: ${member.root}`,
+        `pnpm install --frozen-lockfile: ${formatError(error)}`,
+        "Fix: this is the exact command that member's own CI runs -- if it refuses here, CI would refuse too.",
+      ].join("\n"),
+    };
+  }
+
+  return { regenerated: true, passed: true, refusalMessage: "" };
 }
 
 /**
@@ -1536,6 +1634,7 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
     sha256File: dependencies.sha256File ?? defaultSha256File,
     resolvePkgistCli: dependencies.resolvePkgistCli ?? resolvePkgistCli,
     resolveNpmCli: dependencies.resolveNpmCli ?? resolveNpmCli,
+    resolvePnpmCli: dependencies.resolvePnpmCli ?? resolvePnpmCli,
     resolvePackageScript: dependencies.resolvePackageScript ?? resolveLocalPackageScript,
     runLocalGate: dependencies.runLocalGate ?? runLocalRegistryPreGate,
     now: dependencies.now ?? (() => new Date()),
@@ -1648,6 +1747,24 @@ export function resolveNpmCli(): string {
   }
   const adjacent = path.resolve(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
   return adjacent;
+}
+
+/**
+ * Locate pnpm's own CLI entry, the same way `resolveNpmCli` locates npm's:
+ * a real JS entry file, invoked directly with `process.execPath`, never
+ * through `npx`/`pnpm exec` (that resolution failure mode is exactly what
+ * this workspace forbids invoking directly).
+ *
+ * pnpm ships alongside node via corepack/the version manager as
+ * `node_modules/pnpm/bin/pnpm.mjs`, sibling to `process.execPath` itself --
+ * mirroring where `node_modules/npm` sits next to it.
+ */
+export function resolvePnpmCli(): string {
+  const invokedByPnpm = process.env.npm_execpath;
+  if (invokedByPnpm && path.isAbsolute(invokedByPnpm) && /pnpm(?:\.c?js|\.mjs)$/i.test(invokedByPnpm)) {
+    return invokedByPnpm;
+  }
+  return path.resolve(path.dirname(process.execPath), "node_modules/pnpm/bin/pnpm.mjs");
 }
 
 function originEnvironment(
