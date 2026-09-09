@@ -120,8 +120,16 @@ export interface BuildProvenanceEntry {
   version: string;
   tarballPath: string;
   sha256: string;
-  /** Full 40-char lowercase git commit hash, from that package's own repo. */
+  /** Full 40-char lowercase git commit hash, from that package's own repo, captured BEFORE the version bump. */
   gitHead: string;
+  /**
+   * Full 40-char lowercase git commit hash of the commit this member's tarball
+   * was actually built from: the version bump and (when regenerated) the
+   * lockfile, committed in that member's own repo immediately before packing.
+   * `gitHead` above is its parent -- kept because something downstream may
+   * still want it -- but THIS is what a later phase tags.
+   */
+  releaseCommitSha: string;
   /** Full `git status --porcelain` for that package's repo, captured at build time -- not scoped to the published surface. */
   gitDirtyEntries: readonly DirtyPathEntry[];
   builtAt: string;
@@ -450,6 +458,7 @@ async function buildAndPackAllMembers(
   const dirtyTreeRefusals: string[] = [];
   const qualityRefusals: string[] = [];
   const lockfileRefusals: string[] = [];
+  const commitRefusals: string[] = [];
 
   for (const member of family.members) {
     // Adjacent to the pack, per-member, not a sweep somewhere upstream: a
@@ -477,6 +486,10 @@ async function buildAndPackAllMembers(
       qualityRefusals.push(quality.refusalMessage);
       continue;
     }
+
+    // Captured BEFORE `pkgist build` touches this member's tree, so it stays
+    // the pre-bump commit even though the commit step below moves HEAD.
+    const gitHead = await getGitHead(member, runtime);
 
     await runtime.runCommand({
       command: process.execPath,
@@ -508,6 +521,17 @@ async function buildAndPackAllMembers(
       continue;
     }
 
+    // Commit THIS member's release edits -- the bumped manifest and, when
+    // regenerated, its lockfile -- in its own repo, immediately before it is
+    // packed. Same call site as the checks above, same reason: the tarball is
+    // built from this member's working tree, and until this commit exists
+    // nothing in git describes what was actually packed.
+    const commit = await commitMemberReleaseEdits(member, version, lockfile.regenerated, runtime);
+    if (!commit.committed) {
+      commitRefusals.push(commit.refusalMessage);
+      continue;
+    }
+
     const buildDirectory = path.join(BUILD_ROOT, ...member.name.split("/"), version);
     const packed = await runtime.runCommand({
       command: process.execPath,
@@ -532,23 +556,30 @@ async function buildAndPackAllMembers(
 
     // Provenance is recorded for EVERY build, whether or not this run used
     // --reuse-artifacts: it is what lets a LATER run reuse these tarballs.
-    const gitHead = await getGitHead(member, runtime);
     provenance.push({
       name: member.name,
       version,
       tarballPath,
       sha256,
       gitHead,
+      releaseCommitSha: commit.sha,
       gitDirtyEntries: [...cleanliness.dirtyInSurface, ...cleanliness.waivedOutsideSurface],
       builtAt: runtime.now().toISOString(),
     });
   }
 
-  if (dirtyTreeRefusals.length > 0 || qualityRefusals.length > 0 || lockfileRefusals.length > 0) {
+  if (
+    dirtyTreeRefusals.length > 0 ||
+    qualityRefusals.length > 0 ||
+    lockfileRefusals.length > 0 ||
+    commitRefusals.length > 0
+  ) {
     // Every clean, green member above still built and packed (see the
     // `continue`s above) — this refuses the release as a whole only now,
     // after every member has had its own independent chance, never before.
-    throw new Error([...dirtyTreeRefusals, ...qualityRefusals, ...lockfileRefusals].join("\n\n"));
+    throw new Error(
+      [...dirtyTreeRefusals, ...qualityRefusals, ...lockfileRefusals, ...commitRefusals].join("\n\n"),
+    );
   }
 
   return { artifacts, provenance };
@@ -1050,6 +1081,63 @@ export async function regenerateMemberLockfile(
   }
 
   return { regenerated: true, passed: true, refusalMessage: "" };
+}
+
+export interface MemberCommitResult {
+  committed: boolean;
+  refusalMessage: string;
+  /** Full 40-char lowercase sha of the new commit -- empty when `committed` is false. */
+  sha: string;
+}
+
+/**
+ * Commit one family member's release edits -- its bumped `package.json` and,
+ * when this run regenerated one, its `pnpm-lock.yaml` -- in that member's own
+ * repo, immediately before it is packed.
+ *
+ * Path-scoped, explicit paths only. Never `git commit -a`, `git add -A` or
+ * `git add .`: `checkPackageTreeIsClean` WAIVES (and merely logs) an
+ * uncommitted change OUTSIDE this member's published surface, so a
+ * teammate's unrelated in-progress file can legitimately be sitting in this
+ * tree right now. A sweep would pull it into a release commit; naming exactly
+ * the paths this release wrote is what keeps that impossible.
+ */
+export async function commitMemberReleaseEdits(
+  member: WarlockFamilyMember,
+  version: string,
+  includeLockfile: boolean,
+  runtime: Runtime,
+): Promise<MemberCommitResult> {
+  const paths = includeLockfile ? ["package.json", PNPM_LOCKFILE_NAME] : ["package.json"];
+
+  try {
+    await runtime.runCommand({
+      command: "git",
+      args: ["add", "--", ...paths],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    await runtime.runCommand({
+      command: "git",
+      args: ["commit", "-m", `release: ${member.name}@${version}`, "--", ...paths],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+  } catch (error) {
+    return {
+      committed: false,
+      refusalMessage: [
+        `Refusing to pack ${member.name}: its release edits could not be committed.`,
+        `Package root: ${member.root}`,
+        `Paths: ${paths.join(", ")}`,
+        `git commit: ${formatError(error)}`,
+      ].join("\n"),
+      sha: "",
+    };
+  }
+
+  const sha = await getGitHead(member, runtime);
+  return { committed: true, refusalMessage: "", sha };
 }
 
 /**

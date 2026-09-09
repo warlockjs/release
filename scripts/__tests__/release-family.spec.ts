@@ -707,6 +707,202 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
   });
 });
 
+describe("per-member release commit (card D1a)", () => {
+  const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications" — no lockfile
+  const createWarlockRoot = FAMILY.members[1].root; // "create-warlock" — has one
+
+  const PNPM_MARKER = path.resolve("pnpm", "bin", "pnpm.mjs");
+
+  function commitFixture(
+    outcomes: {
+      gitStatus?: ReadonlyMap<string, string>;
+      commit?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
+    } = {},
+  ): ReturnType<typeof fixture> {
+    const control = fixture({
+      // Only create-warlock carries a lockfile.
+      fileExists: async filePath => path.basename(filePath) === "pnpm-lock.yaml"
+        && path.dirname(filePath) === createWarlockRoot,
+    });
+    const baseRunCommand = control.dependencies.runCommand!;
+    const revCounts = new Map<string, number>();
+    control.dependencies.runCommand = async request => {
+      if (request.command === "git" && request.args[0] === "rev-parse") {
+        control.commands.push(request);
+        const count = (revCounts.get(request.cwd) ?? 0) + 1;
+        revCounts.set(request.cwd, count);
+        // First call per member (pre-bump gitHead) vs. every call after the
+        // release commit (releaseCommitSha) return distinct shas, so a test
+        // can tell them apart.
+        const sha = count === 1 ? "a".repeat(40) : "b".repeat(40);
+        return { stdout: `${sha}\n`, stderr: "" };
+      }
+      if (request.command === "git" && (request.args[0] === "add" || request.args[0] === "commit")) {
+        control.commands.push(request);
+        const outcome = outcomes.commit?.(request) ?? { stdout: "", stderr: "" };
+        if (outcome instanceof Error) throw outcome;
+        return outcome;
+      }
+      if (request.command === "git" && request.args[0] === "status") {
+        control.commands.push(request);
+        const stdout = outcomes.gitStatus?.get(request.cwd) ?? "";
+        return { stdout, stderr: "" };
+      }
+      return await baseRunCommand(request);
+    };
+    return control;
+  }
+
+  function gitCommandsFor(control: ReturnType<typeof fixture>, root: string): CommandRequest[] {
+    return control.commands.filter(command => command.command === "git" && command.cwd === root);
+  }
+
+  it("commits after the lockfile step and before the pack, staging ONLY the paths this release wrote", async () => {
+    const control = commitFixture();
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff);
+
+    const cwCommands = control.commands.filter(
+      command =>
+        (command.args[1] === "build" && command.args[2] === "create-warlock") ||
+        (command.args[0] === PNPM_MARKER && command.cwd === createWarlockRoot) ||
+        (command.command === "git" &&
+          command.cwd === createWarlockRoot &&
+          (command.args[0] === "add" || command.args[0] === "commit")) ||
+        (command.args[1] === "pack" && String(command.args[2]).includes("create-warlock")),
+    );
+    const orderedKinds = cwCommands.map(command => {
+      if (command.args[1] === "build") return "build";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--lockfile-only")) return "lockfile-only";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--frozen-lockfile")) return "frozen-lockfile";
+      if (command.command === "git" && command.args[0] === "add") return "add";
+      if (command.command === "git" && command.args[0] === "commit") return "commit";
+      if (command.args[1] === "pack") return "pack";
+      return "other";
+    });
+
+    assert.deepEqual(orderedKinds, [
+      "build",
+      "lockfile-only",
+      "frozen-lockfile",
+      "add",
+      "commit",
+      "pack",
+    ]);
+
+    // create-warlock regenerated a lockfile this run: both package.json and
+    // its lockfile are staged and committed, nothing else.
+    const cwGit = gitCommandsFor(control, createWarlockRoot).filter(
+      command => command.args[0] === "add" || command.args[0] === "commit",
+    );
+    for (const command of cwGit) {
+      assert.deepEqual([...command.args].slice(-2).sort(), ["package.json", "pnpm-lock.yaml"]);
+    }
+
+    // notifications has no lockfile: only its package.json is staged.
+    const notifGit = gitCommandsFor(control, notificationsRoot).filter(
+      command => command.args[0] === "add" || command.args[0] === "commit",
+    );
+    assert.ok(notifGit.length > 0);
+    for (const command of notifGit) {
+      assert.deepEqual([...command.args].slice(-1), ["package.json"]);
+    }
+
+    // Never a sweep.
+    for (const command of control.commands) {
+      if (command.command !== "git") continue;
+      if (command.args[0] === "add" || command.args[0] === "commit") {
+        assert.ok(!command.args.includes("-a"));
+        assert.ok(!command.args.includes("-A"));
+        assert.ok(!command.args.includes("."));
+      }
+    }
+  });
+
+  it("a dirty path OUTSIDE the published surface is NOT staged by the release commit", async () => {
+    const control = commitFixture({
+      gitStatus: new Map([
+        // "tests/" is not the configured srcDir ("src") and not in this
+        // package's pkgist `clone` list, so it never ships and is waived by
+        // checkPackageTreeIsClean -- but it is still sitting in the tree.
+        [notificationsRoot, "?? tests/fixtures/somebody-elses-file.ts\n"],
+      ]),
+    });
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff, "a surface-external dirty file must not block the release");
+
+    const notifGit = gitCommandsFor(control, notificationsRoot).filter(
+      command => command.args[0] === "add" || command.args[0] === "commit",
+    );
+    assert.ok(notifGit.length > 0, "the release commit must still happen");
+    for (const command of notifGit) {
+      assert.ok(
+        !command.args.some(arg => arg.includes("somebody-elses-file")),
+        `must never stage a path outside the published surface; got: ${command.args.join(" ")}`,
+      );
+      assert.deepEqual([...command.args].slice(-1), ["package.json"]);
+    }
+  });
+
+  it("records the new release-commit sha in provenance, distinct from the pre-bump gitHead", async () => {
+    let capturedProvenance: unknown;
+    const control = commitFixture();
+    control.dependencies.writeTextFile = async (filePath, contents) => {
+      if (path.basename(filePath) === "build-provenance.json") capturedProvenance = JSON.parse(contents);
+    };
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff);
+
+    const provenance = capturedProvenance as {
+      members: Array<{ name: string; gitHead: string; releaseCommitSha: string }>;
+    };
+    assert.ok(provenance, "provenance must be written");
+    for (const entry of provenance.members) {
+      assert.equal(entry.gitHead, "a".repeat(40));
+      assert.equal(entry.releaseCommitSha, "b".repeat(40));
+      assert.notEqual(entry.gitHead, entry.releaseCommitSha);
+    }
+  });
+
+  it("RED CONTROL: a member whose release commit fails is refused alone; the others still build; the run throws once", async () => {
+    const control = commitFixture({
+      commit: request =>
+        request.args[0] === "commit" && request.cwd === createWarlockRoot
+          ? new Error(`${process.execPath} exited 1: nothing to commit? or hook refused`)
+          : { stdout: "", stderr: "" },
+    });
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+      error => {
+        const message = (error as Error).message;
+        assert.match(message, /Refusing to pack create-warlock/);
+        assert.match(message, /release edits could not be committed/);
+        return true;
+      },
+    );
+
+    const cwPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+    );
+    assert.equal(cwPacks.length, 0, "member whose release commit failed must not be packed");
+
+    const notifBuilds = control.commands.filter(
+      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+    );
+    const notifPacks = control.commands.filter(
+      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+    );
+    assert.equal(notifBuilds.length, 1, "unaffected sibling must still build");
+    assert.equal(notifPacks.length, 1, "unaffected sibling must still pack");
+
+    // Restore: a succeeding commit passes green again.
+    const cleanControl = commitFixture();
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
+    assert.ok(handoff);
+  });
+});
+
 describe("resolveLocalPackageScript (real filesystem, no mocking)", () => {
   const builderRoot = path.resolve(import.meta.dirname, "..", "..");
 
