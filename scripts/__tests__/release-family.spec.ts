@@ -9,6 +9,7 @@ import {
   assertMatrixScopeIsStated,
   assertSinglePhysicalCore,
   checkPackageTreeIsClean,
+  confirmSubjectsAtOrigin,
   parseArguments,
   parseGitPorcelain,
   qualityCheckEnvironment,
@@ -1087,6 +1088,37 @@ describe("runReleaseFamily publish mode", () => {
       "publish:artifact-1.tgz",
     ]);
   });
+
+  it("reports one progress line per package, in order, with the count (the reported defect)", async () => {
+    const reported: string[] = [];
+    const artifacts = FAMILY.members.map((member, index) => ({
+      name: member.name,
+      tarballPath: path.resolve(`artifact-${index}.tgz`),
+      sha256: HASH,
+    }));
+    const control = fixture({
+      readTextFile: async () => JSON.stringify({
+        kind: "warlock-family-publish-handoff",
+        candidateVersion: VERSION,
+        subjects: FAMILY.members.map(member => member.name),
+        artifacts,
+        verifiedAt: "2026-09-02T12:00:00.000Z",
+        matrixScope: "full",
+      }),
+      report: line => reported.push(line),
+      runCommand: async request => {
+        if (request.args[1] === "config") return { stdout: `${NPM_ORIGIN}/\n`, stderr: "" };
+        return { stdout: "", stderr: "" };
+      },
+    });
+
+    await runReleaseFamily({ mode: "publish", version: VERSION }, control.dependencies);
+
+    assert.deepEqual(reported, [
+      "[1/2] @warlock.js/notifications: published",
+      "[2/2] create-warlock: published",
+    ]);
+  });
 });
 
 describe("--reuse-artifacts", () => {
@@ -1766,6 +1798,153 @@ describe("runReleaseFamily confirm mode — tag and push only after origin confi
     );
 
     assert.equal(control.commands.some(command => command.command === "git"), false);
+  });
+});
+
+describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)", () => {
+  const ROOT = path.resolve("confirm-subjects-root");
+  const CACHE = path.join(ROOT, "npm-cache");
+  const NPMRC = path.join(ROOT, ".npmrc");
+  const GLOBAL_NPMRC = path.join(ROOT, "global.npmrc");
+  const ENV = { PATH: process.env.PATH ?? "" };
+
+  function fakeRuntime(
+    versionsByAttempt: ReadonlyMap<string, readonly (string | undefined)[]>,
+  ): {
+    runtime: {
+      resolveNpmCli(): string;
+      runCommand(request: CommandRequest): Promise<{ stdout: string; stderr: string }>;
+      report(line: string): void;
+      sleep(ms: number): Promise<void>;
+    };
+    reported: string[];
+    sleeps: number[];
+    viewCalls: string[];
+  } {
+    const reported: string[] = [];
+    const sleeps: number[] = [];
+    const viewCalls: string[] = [];
+    const attemptsSeen = new Map<string, number>();
+    return {
+      reported,
+      sleeps,
+      viewCalls,
+      runtime: {
+        resolveNpmCli: () => path.resolve("npm", "bin", "npm-cli.js"),
+        runCommand: async request => {
+          const name = request.args[2]?.toString().replace(/@[^@]+$/, "") ?? "";
+          viewCalls.push(name);
+          const attempt = attemptsSeen.get(name) ?? 0;
+          attemptsSeen.set(name, attempt + 1);
+          const versions = versionsByAttempt.get(name) ?? [];
+          const observed = attempt < versions.length ? versions[attempt] : versions.at(-1);
+          return { stdout: JSON.stringify(observed ?? null), stderr: "" };
+        },
+        report: line => reported.push(line),
+        sleep: async ms => {
+          sleeps.push(ms);
+        },
+      },
+    };
+  }
+
+  it("a subject unconfirmed on the first poll and confirmed on a later one ends PENDING then live, and the run SUCCEEDS", async () => {
+    const handoff: ReleaseHandoff = {
+      kind: "warlock-family-publish-handoff",
+      candidateVersion: VERSION,
+      subjects: ["@warlock.js/notifications"],
+      artifacts: [],
+      verifiedAt: "2026-09-02T12:00:00.000Z",
+    };
+    const { runtime, reported } = fakeRuntime(
+      new Map([["@warlock.js/notifications", [undefined, VERSION]]]),
+    );
+
+    await confirmSubjectsAtOrigin(handoff, runtime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV);
+
+    assert.ok(
+      reported.some(line => line.includes("@warlock.js/notifications") && line.includes("PENDING")),
+      "expected a PENDING line before confirmation",
+    );
+    assert.ok(
+      reported.some(line => line === "@warlock.js/notifications: live (confirmed on attempt 2/5)"),
+      "expected a live confirmation line naming the successful attempt",
+    );
+    assert.ok(
+      reported.some(line => line.startsWith("Origin confirmation summary: 1/1 live")),
+      "expected the terminal summary to show 1/1 live",
+    );
+  });
+
+  it("a subject unconfirmed for the whole budget ends MISSING and the run FAILS naming it", async () => {
+    const handoff: ReleaseHandoff = {
+      kind: "warlock-family-publish-handoff",
+      candidateVersion: VERSION,
+      subjects: ["@warlock.js/notifications"],
+      artifacts: [],
+      verifiedAt: "2026-09-02T12:00:00.000Z",
+    };
+    const { runtime, reported, sleeps } = fakeRuntime(new Map());
+
+    await assert.rejects(
+      confirmSubjectsAtOrigin(handoff, runtime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV),
+      /did not confirm 1 of 1 package\(s\).*@warlock\.js\/notifications/s,
+    );
+
+    assert.ok(
+      reported.some(line => line === "@warlock.js/notifications: MISSING after 5 attempt(s)"),
+      "expected an explicit MISSING line",
+    );
+    assert.ok(
+      reported.some(line => line.startsWith("Origin confirmation summary: 0/1 live")),
+      "expected the terminal summary on the failing path too",
+    );
+    assert.equal(sleeps.length, 4, "budget of 5 attempts retries 4 times between them");
+    assert.ok(sleeps.every(ms => ms === 3_000), "the printed/used budget must be the same delay every time");
+  });
+
+  it("when two subjects are unconfirmed, BOTH are named -- the old code could name only the first", async () => {
+    const handoff: ReleaseHandoff = {
+      kind: "warlock-family-publish-handoff",
+      candidateVersion: VERSION,
+      subjects: ["@warlock.js/notifications", "create-warlock"],
+      artifacts: [],
+      verifiedAt: "2026-09-02T12:00:00.000Z",
+    };
+    const { runtime } = fakeRuntime(new Map());
+
+    await assert.rejects(
+      confirmSubjectsAtOrigin(handoff, runtime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV),
+      error => {
+        assert.match((error as Error).message, /@warlock\.js\/notifications/);
+        assert.match((error as Error).message, /create-warlock/);
+        return true;
+      },
+    );
+  });
+
+  it("never asks npm's write path a read question -- no argument list anywhere contains --dry-run", async () => {
+    const handoff: ReleaseHandoff = {
+      kind: "warlock-family-publish-handoff",
+      candidateVersion: VERSION,
+      subjects: ["@warlock.js/notifications"],
+      artifacts: [],
+      verifiedAt: "2026-09-02T12:00:00.000Z",
+    };
+    const seenArgs: string[][] = [];
+    const { runtime } = fakeRuntime(new Map([["@warlock.js/notifications", [VERSION]]]));
+    const spyRuntime = {
+      ...runtime,
+      runCommand: async (request: CommandRequest) => {
+        seenArgs.push([...request.args]);
+        return await runtime.runCommand(request);
+      },
+    };
+
+    await confirmSubjectsAtOrigin(handoff, spyRuntime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV);
+
+    assert.ok(seenArgs.length > 0);
+    assert.ok(seenArgs.every(args => !args.includes("--dry-run")));
   });
 });
 

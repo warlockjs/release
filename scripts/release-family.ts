@@ -55,6 +55,14 @@ const DEPENDENCY_FIELDS = [
   "optionalDependencies",
 ] as const;
 
+/**
+ * The confirmation budget: how many times each still-unconfirmed subject is
+ * re-polled, and how long between polls, before it is declared MISSING
+ * rather than PENDING. Kept small deliberately -- see `confirmAtOrigin`.
+ */
+const CONFIRMATION_MAX_ATTEMPTS = 5;
+const CONFIRMATION_RETRY_DELAY_MS = 3_000;
+
 export type ReleaseMode = "gate" | "publish" | "confirm";
 
 export interface ReleaseOptions {
@@ -194,6 +202,10 @@ export interface ReleaseFamilyDependencies {
     dependencies: LocalRegistryGateDependencies,
   ): Promise<PublishHandoff>;
   now?(): Date;
+  /** Every operator-facing progress/summary line goes through this, never a bare `console.log`. */
+  report?(line: string): void;
+  /** The one place a retry delay may come from -- never a bare `setTimeout` a spec cannot control. */
+  sleep?(milliseconds: number): Promise<void>;
 }
 
 export type BuiltManifest = Record<string, unknown> & {
@@ -1353,7 +1365,8 @@ async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promis
     });
     assertEffectiveOrigin(effective.stdout, env, cache, userconfig, globalconfig);
 
-    for (const artifact of handoff.artifacts) {
+    const total = handoff.artifacts.length;
+    for (const [index, artifact] of handoff.artifacts.entries()) {
       await assertArtifactHash(artifact, runtime.sha256File);
       await runtime.runCommand({
         command: process.execPath,
@@ -1361,28 +1374,49 @@ async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promis
         cwd: root,
         env,
       });
+      runtime.report(`[${index + 1}/${total}] ${artifact.name}: published`);
     }
   } finally {
     await runtime.removeDirectory(root);
   }
 }
 
-async function confirmAtOrigin(handoff: ReleaseHandoff, runtime: Runtime): Promise<void> {
-  const root = await runtime.makeTemporaryDirectory("warlock-origin-confirm-");
-  const cache = path.join(root, "npm-cache");
-  const npmrc = path.join(root, ".npmrc");
-  const globalNpmrc = path.join(root, "global.npmrc");
-  const consumer = path.join(root, "consumer");
-  const scaffoldParent = path.join(root, "scaffold");
-  await runtime.makeDirectory(cache);
-  await runtime.makeDirectory(consumer);
-  await runtime.makeDirectory(scaffoldParent);
-  await runtime.writeTextFile(npmrc, `registry=${NPM_ORIGIN}\ncache=${cache}\nalways-auth=false\n`);
-  await runtime.writeTextFile(globalNpmrc, "");
-  const env = originEnvironment(process.env, cache, npmrc, globalNpmrc);
+type SubjectConfirmationStatus = "live" | "pending" | "missing";
 
-  try {
-    for (const name of handoff.subjects) {
+/**
+ * Poll every subject, never throwing on the first miss. A subject
+ * unconfirmed on one attempt is PENDING and is retried; one still
+ * unconfirmed when `CONFIRMATION_MAX_ATTEMPTS` is spent is MISSING.
+ *
+ * The terminal summary -- which of the N subjects are live -- prints on
+ * BOTH the success and the failure path, because it is what replaces the
+ * dry-run publish an operator used to reach for on a bad day.
+ */
+export async function confirmSubjectsAtOrigin(
+  handoff: ReleaseHandoff,
+  runtime: Pick<Runtime, "resolveNpmCli" | "runCommand" | "report" | "sleep">,
+  root: string,
+  cache: string,
+  npmrc: string,
+  globalNpmrc: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  const statuses = new Map<string, SubjectConfirmationStatus>(
+    handoff.subjects.map(name => [name, "pending"]),
+  );
+
+  runtime.report(
+    `Confirming ${handoff.subjects.length} package(s) at ${handoff.candidateVersion} ` +
+      `(up to ${CONFIRMATION_MAX_ATTEMPTS} attempt(s), ${CONFIRMATION_RETRY_DELAY_MS}ms apart)...`,
+  );
+
+  for (let attempt = 1; attempt <= CONFIRMATION_MAX_ATTEMPTS; attempt++) {
+    const outstanding = [...statuses.entries()]
+      .filter(([, status]) => status === "pending")
+      .map(([name]) => name);
+    if (outstanding.length === 0) break;
+
+    for (const name of outstanding) {
       const result = await runtime.runCommand({
         command: process.execPath,
         args: [
@@ -1405,12 +1439,55 @@ async function confirmAtOrigin(handoff: ReleaseHandoff, runtime: Runtime): Promi
         env,
       });
       const observed = parseJsonOrText(result.stdout);
-      if (observed !== handoff.candidateVersion) {
-        throw new Error(
-          `npm origin did not confirm ${name}@${handoff.candidateVersion}; observed ${String(observed)}.`,
-        );
+      if (observed === handoff.candidateVersion) {
+        statuses.set(name, "live");
+        runtime.report(`${name}: live (confirmed on attempt ${attempt}/${CONFIRMATION_MAX_ATTEMPTS})`);
+      } else if (attempt === CONFIRMATION_MAX_ATTEMPTS) {
+        statuses.set(name, "missing");
+        runtime.report(`${name}: MISSING after ${CONFIRMATION_MAX_ATTEMPTS} attempt(s)`);
+      } else {
+        runtime.report(`${name}: PENDING (attempt ${attempt}/${CONFIRMATION_MAX_ATTEMPTS})`);
       }
     }
+
+    const stillPending = [...statuses.values()].some(status => status === "pending");
+    if (stillPending && attempt < CONFIRMATION_MAX_ATTEMPTS) {
+      await runtime.sleep(CONFIRMATION_RETRY_DELAY_MS);
+    }
+  }
+
+  const live = [...statuses.entries()].filter(([, status]) => status === "live").map(([name]) => name);
+  const missing = [...statuses.entries()].filter(([, status]) => status === "missing").map(([name]) => name);
+
+  runtime.report(
+    `Origin confirmation summary: ${live.length}/${handoff.subjects.length} live` +
+      (missing.length > 0 ? `; MISSING: ${missing.join(", ")}` : ""),
+  );
+
+  if (missing.length > 0) {
+    throw new Error(
+      `npm origin did not confirm ${missing.length} of ${handoff.subjects.length} package(s) at ` +
+        `${handoff.candidateVersion} within budget (${CONFIRMATION_MAX_ATTEMPTS} attempts): ${missing.join(", ")}.`,
+    );
+  }
+}
+
+async function confirmAtOrigin(handoff: ReleaseHandoff, runtime: Runtime): Promise<void> {
+  const root = await runtime.makeTemporaryDirectory("warlock-origin-confirm-");
+  const cache = path.join(root, "npm-cache");
+  const npmrc = path.join(root, ".npmrc");
+  const globalNpmrc = path.join(root, "global.npmrc");
+  const consumer = path.join(root, "consumer");
+  const scaffoldParent = path.join(root, "scaffold");
+  await runtime.makeDirectory(cache);
+  await runtime.makeDirectory(consumer);
+  await runtime.makeDirectory(scaffoldParent);
+  await runtime.writeTextFile(npmrc, `registry=${NPM_ORIGIN}\ncache=${cache}\nalways-auth=false\n`);
+  await runtime.writeTextFile(globalNpmrc, "");
+  const env = originEnvironment(process.env, cache, npmrc, globalNpmrc);
+
+  try {
+    await confirmSubjectsAtOrigin(handoff, runtime, root, cache, npmrc, globalNpmrc, env);
 
     await runtime.writeTextFile(
       path.join(consumer, "package.json"),
@@ -2072,6 +2149,8 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
     resolvePackageScript: dependencies.resolvePackageScript ?? resolveLocalPackageScript,
     runLocalGate: dependencies.runLocalGate ?? runLocalRegistryPreGate,
     now: dependencies.now ?? (() => new Date()),
+    report: dependencies.report ?? (line => console.log(line)),
+    sleep: dependencies.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))),
   };
 }
 
