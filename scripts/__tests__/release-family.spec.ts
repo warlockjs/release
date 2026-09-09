@@ -12,14 +12,17 @@ import {
   parseArguments,
   parseGitPorcelain,
   qualityCheckEnvironment,
+  releaseTagName,
   resolveLocalPackageScript,
   resolvePublishedSurface,
   runReleaseFamily,
+  tagAndPushAllMembers,
+  tagAndPushMember,
   type CommandRequest,
   type ReleaseFamilyDependencies,
   type ReleaseHandoff,
 } from "../release-family.ts";
-import type { WarlockFamily } from "../warlock-family.ts";
+import type { WarlockFamily, WarlockFamilyMember } from "../warlock-family.ts";
 
 const VERSION = "5.3.0";
 /**
@@ -1437,6 +1440,332 @@ describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
       () => parseArguments(["gate", "--version", VERSION, "--matrix", "some"]),
       /must be one of none \| subset \| full/,
     );
+  });
+});
+
+type GitResponses = {
+  branch?: string;
+  originBranchTip?: string;
+  originTagSha?: string;
+  localTagSha?: string;
+  ancestorOk?: boolean;
+  logLines?: readonly string[];
+};
+
+/** Shared fake for every `tagAndPushMember`/`tagAndPushAllMembers` test below -- throws on any git invocation it was not told to expect, which is what proves the implementation never queries plain `git rev-parse HEAD` or passes `--force`. */
+function respondToGitCommand(request: CommandRequest, responses: GitResponses) {
+  if (request.command !== "git") throw new Error(`unexpected non-git command: ${request.command}`);
+  const [a0, a1] = request.args;
+  if (a0 === "rev-parse" && a1 === "--abbrev-ref") {
+    return { stdout: `${responses.branch ?? "main"}\n`, stderr: "" };
+  }
+  if (a0 === "rev-parse" && a1 === "--verify") {
+    if (!responses.localTagSha) throw new Error("tag does not exist locally");
+    return { stdout: `${responses.localTagSha}\n`, stderr: "" };
+  }
+  if (a0 === "ls-remote") {
+    const ref = request.args[2];
+    if (ref?.startsWith("refs/heads/")) {
+      return { stdout: responses.originBranchTip ? `${responses.originBranchTip}\t${ref}\n` : "", stderr: "" };
+    }
+    if (ref?.startsWith("refs/tags/")) {
+      return { stdout: responses.originTagSha ? `${responses.originTagSha}\t${ref}\n` : "", stderr: "" };
+    }
+    throw new Error(`unexpected ls-remote ref: ${String(ref)}`);
+  }
+  if (a0 === "merge-base") {
+    if (responses.ancestorOk === false) throw new Error("not an ancestor");
+    return { stdout: "", stderr: "" };
+  }
+  if (a0 === "log") {
+    return { stdout: `${(responses.logLines ?? []).join("\n")}\n`, stderr: "" };
+  }
+  if (a0 === "tag" || a0 === "push") {
+    return { stdout: "", stderr: "" };
+  }
+  throw new Error(`respondToGitCommand has no stub for git ${request.args.join(" ")}`);
+}
+
+function fakeGitRuntime(responses: GitResponses) {
+  const commands: CommandRequest[] = [];
+  return {
+    commands,
+    runCommand: async (request: CommandRequest) => {
+      commands.push(request);
+      return respondToGitCommand(request, responses);
+    },
+  };
+}
+
+function fakeGitRuntimeByRoot(byRoot: ReadonlyMap<string, GitResponses>) {
+  const commands: CommandRequest[] = [];
+  return {
+    commands,
+    runCommand: async (request: CommandRequest) => {
+      commands.push(request);
+      const responses = byRoot.get(request.cwd);
+      if (!responses) throw new Error(`fakeGitRuntimeByRoot has no stub for cwd ${request.cwd}`);
+      return respondToGitCommand(request, responses);
+    },
+  };
+}
+
+function makeMember(name: string, root: string): WarlockFamilyMember {
+  return { name, root: path.resolve(root), configuredRoot: path.resolve(root), version: VERSION };
+}
+
+function provenanceReadTextFile(
+  members: ReadonlyArray<{ name: string; releaseCommitSha: string }>,
+): (filePath: string) => Promise<string> {
+  return async filePath => {
+    if (path.basename(filePath) === "build-provenance.json") {
+      return JSON.stringify({
+        schemaVersion: 1,
+        family: "warlock",
+        version: VERSION,
+        members: members.map(member => ({
+          name: member.name,
+          version: VERSION,
+          tarballPath: path.resolve(`${member.name.replace(/[@/]/g, "-")}.tgz`),
+          sha256: HASH,
+          gitHead: "1".repeat(40),
+          releaseCommitSha: member.releaseCommitSha,
+          gitDirtyEntries: [],
+          builtAt: "2026-09-01T00:00:00.000Z",
+        })),
+      });
+    }
+    throw new Error(`provenanceReadTextFile has no stub for ${filePath}`);
+  };
+}
+
+describe("tagAndPushMember (D1b)", () => {
+  it("tags at the recorded releaseCommitSha, never at HEAD", async () => {
+    const member = makeMember("@warlock.js/notifications", "tag-push-notifications-1");
+    const sha = "b".repeat(40);
+    const runtime = fakeGitRuntime({ branch: "main" });
+
+    const outcome = await tagAndPushMember(member, VERSION, sha, runtime as never);
+
+    assert.equal(outcome.refused, false);
+    const tagCommand = runtime.commands.find(command => command.args[0] === "tag");
+    assert.ok(tagCommand, "a tag command must have been issued");
+    assert.deepEqual(tagCommand!.args, ["tag", releaseTagName(VERSION), sha]);
+    // respondToGitCommand throws on any git invocation it was not told to
+    // expect -- a plain `git rev-parse HEAD` (as opposed to
+    // `--abbrev-ref HEAD`) is not one of them, so reaching this point at all
+    // proves HEAD's own sha was never read on this path.
+  });
+
+  it("an existing local tag at the SAME sha is success, not re-created", async () => {
+    const member = makeMember("@warlock.js/notifications", "tag-push-notifications-2");
+    const sha = "b".repeat(40);
+    const runtime = fakeGitRuntime({ branch: "main", localTagSha: sha });
+
+    const outcome = await tagAndPushMember(member, VERSION, sha, runtime as never);
+
+    assert.equal(outcome.refused, false);
+    assert.equal(outcome.alreadyTagged, true);
+    assert.equal(outcome.tagged, false);
+    assert.equal(runtime.commands.some(command => command.args[0] === "tag"), false);
+  });
+
+  it("an existing local tag at a DIFFERENT sha is a refusal, and --force is never passed", async () => {
+    const member = makeMember("@warlock.js/notifications", "tag-push-notifications-3");
+    const sha = "b".repeat(40);
+    const runtime = fakeGitRuntime({ branch: "main", localTagSha: "d".repeat(40) });
+
+    const outcome = await tagAndPushMember(member, VERSION, sha, runtime as never);
+
+    assert.equal(outcome.refused, true);
+    assert.match(outcome.refusalMessage, /already exists locally/);
+    assert.match(outcome.refusalMessage, new RegExp(member.name.replace(/[/.]/g, "\\$&")));
+    assert.equal(runtime.commands.some(command => command.args.includes("--force")), false);
+  });
+
+  it("an existing origin tag at a DIFFERENT sha is a refusal, and --force is never passed", async () => {
+    const member = makeMember("@warlock.js/notifications", "tag-push-notifications-4");
+    const sha = "b".repeat(40);
+    const runtime = fakeGitRuntime({ branch: "main", originTagSha: "e".repeat(40) });
+
+    const outcome = await tagAndPushMember(member, VERSION, sha, runtime as never);
+
+    assert.equal(outcome.refused, true);
+    assert.match(outcome.refusalMessage, /already exists there/);
+    assert.equal(runtime.commands.some(command => command.args.includes("--force")), false);
+  });
+
+  it("a fully outstanding member is tagged locally, tagged at origin, and pushed at the recorded sha", async () => {
+    const member = makeMember("@warlock.js/notifications", "tag-push-notifications-5");
+    const sha = "b".repeat(40);
+    const runtime = fakeGitRuntime({ branch: "main" });
+
+    const outcome = await tagAndPushMember(member, VERSION, sha, runtime as never);
+
+    assert.equal(outcome.refused, false);
+    assert.equal(outcome.tagged, true);
+    assert.equal(outcome.tagPushed, true);
+    assert.equal(outcome.pushed, true);
+    assert.ok(
+      runtime.commands.some(
+        command => command.args[0] === "push" && command.args[1] === "origin" && command.args[2] === `${sha}:refs/heads/main`,
+      ),
+      "must push exactly the recorded sha to the branch ref, never the branch tip",
+    );
+  });
+});
+
+describe("tagAndPushAllMembers (D1b)", () => {
+  it("refuses a member whose origin/<branch> is not an ancestor of the recorded sha, naming it, without stopping the others", async () => {
+    const notif = makeMember("@warlock.js/notifications", "tag-push-family-notifications");
+    const cw = makeMember("create-warlock", "tag-push-family-create-warlock");
+    const notifSha = "b".repeat(40);
+    const cwSha = "c".repeat(40);
+    const runtime = fakeGitRuntimeByRoot(
+      new Map([
+        [
+          notif.root,
+          {
+            branch: "main",
+            originBranchTip: "f".repeat(40),
+            ancestorOk: false,
+            logLines: ["f000000 an origin commit this release does not account for"],
+          },
+        ],
+        [cw.root, { branch: "main" }],
+      ]),
+    );
+    const family: WarlockFamily = { name: "warlock", version: VERSION, members: [notif, cw] };
+    const handoff = { subjects: [notif.name, cw.name] } as unknown as ReleaseHandoff;
+
+    await assert.rejects(
+      tagAndPushAllMembers(
+        family,
+        handoff,
+        VERSION,
+        {
+          runCommand: runtime.runCommand,
+          readTextFile: provenanceReadTextFile([
+            { name: notif.name, releaseCommitSha: notifSha },
+            { name: cw.name, releaseCommitSha: cwSha },
+          ]),
+        } as never,
+      ),
+      (error: Error) => {
+        assert.match(error.message, /@warlock\.js\/notifications/);
+        assert.match(error.message, /main/);
+        assert.match(error.message, /an origin commit this release does not account for/);
+        return true;
+      },
+    );
+
+    const cwWrites = runtime.commands.filter(
+      command => command.cwd === cw.root && (command.args[0] === "tag" || command.args[0] === "push"),
+    );
+    assert.ok(
+      cwWrites.length > 0,
+      "create-warlock must still be tagged and pushed even though notifications was refused",
+    );
+    const notifWrites = runtime.commands.filter(
+      command => command.cwd === notif.root && (command.args[0] === "tag" || command.args[0] === "push"),
+    );
+    assert.equal(notifWrites.length, 0, "the refused member must never be tagged or pushed");
+  });
+
+  it("re-running after a partial push tags/pushes only the outstanding members (idempotent)", async () => {
+    const notif = makeMember("@warlock.js/notifications", "tag-push-rerun-notifications");
+    const cw = makeMember("create-warlock", "tag-push-rerun-create-warlock");
+    const notifSha = "b".repeat(40);
+    const cwSha = "c".repeat(40);
+    // notifications was fully tagged + pushed in a prior run; create-warlock is outstanding.
+    const runtime = fakeGitRuntimeByRoot(
+      new Map([
+        [notif.root, { branch: "main", localTagSha: notifSha, originTagSha: notifSha, originBranchTip: notifSha }],
+        [cw.root, { branch: "main" }],
+      ]),
+    );
+    const family: WarlockFamily = { name: "warlock", version: VERSION, members: [notif, cw] };
+    const handoff = { subjects: [notif.name, cw.name] } as unknown as ReleaseHandoff;
+
+    const results = await tagAndPushAllMembers(
+      family,
+      handoff,
+      VERSION,
+      {
+        runCommand: runtime.runCommand,
+        readTextFile: provenanceReadTextFile([
+          { name: notif.name, releaseCommitSha: notifSha },
+          { name: cw.name, releaseCommitSha: cwSha },
+        ]),
+      } as never,
+    );
+
+    assert.deepEqual(
+      results.map(result => ({
+        name: result.name,
+        tagged: result.tagged,
+        alreadyTagged: result.alreadyTagged,
+        pushed: result.pushed,
+        alreadyPushed: result.alreadyPushed,
+      })),
+      [
+        { name: notif.name, tagged: false, alreadyTagged: true, pushed: false, alreadyPushed: true },
+        { name: cw.name, tagged: true, alreadyTagged: false, pushed: true, alreadyPushed: false },
+      ],
+    );
+
+    const notifWrites = runtime.commands.filter(
+      command => command.cwd === notif.root && (command.args[0] === "tag" || command.args[0] === "push"),
+    );
+    assert.equal(notifWrites.length, 0, "an already-tagged-and-pushed member must issue no write commands on re-run");
+
+    const cwWrites = runtime.commands.filter(
+      command => command.cwd === cw.root && (command.args[0] === "tag" || command.args[0] === "push"),
+    );
+    assert.ok(cwWrites.length > 0, "the outstanding member must still be tagged/pushed");
+  });
+});
+
+describe("runReleaseFamily confirm mode — tag and push only after origin confirms (D1b)", () => {
+  it("tags and pushes nothing when origin confirmation fails", async () => {
+    const handoffPath = path.resolve("confirm-red-control-handoff.json");
+    const control = fixture({
+      readTextFile: async filePath => {
+        if (filePath === handoffPath) {
+          return JSON.stringify({
+            kind: "warlock-family-publish-handoff",
+            candidateVersion: VERSION,
+            subjects: FAMILY.members.map(member => member.name),
+            artifacts: FAMILY.members.map((member, index) => ({
+              name: member.name,
+              tarballPath: path.resolve(`confirm-artifact-${index}.tgz`),
+              sha256: HASH,
+            })),
+            verifiedAt: "2026-09-02T12:00:00.000Z",
+            matrixScope: "full",
+          });
+        }
+        throw new Error(`fixture readTextFile has no stub for ${filePath}`);
+      },
+      sha256File: async () => HASH,
+    });
+    control.dependencies.runCommand = async request => {
+      control.commands.push(request);
+      if (request.command === "git") {
+        throw new Error(`unexpected git command reached before origin confirmation succeeded: ${request.args.join(" ")}`);
+      }
+      if (request.args[1] === "view") {
+        throw new Error("npm origin refused to confirm this candidate");
+      }
+      return { stdout: "", stderr: "" };
+    };
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "confirm", version: VERSION, handoffPath }, control.dependencies),
+      /npm origin refused to confirm/,
+    );
+
+    assert.equal(control.commands.some(command => command.command === "git"), false);
   });
 });
 

@@ -255,7 +255,11 @@ export async function runReleaseFamily(
     return;
   }
 
+  // Tagging and pushing happen ONLY after origin confirmation has fully
+  // succeeded (see `tagAndPushAllMembers`) -- a tag or push that exists
+  // before the registry confirms is a claim the release has not earned.
   await confirmAtOrigin(handoff, runtime);
+  await tagAndPushAllMembers(family, handoff, options.version, runtime);
 }
 
 export interface PrepareAndGateOptions {
@@ -1471,6 +1475,348 @@ async function confirmAtOrigin(handoff: ReleaseHandoff, runtime: Runtime): Promi
   } finally {
     await runtime.removeDirectory(root);
   }
+}
+
+/** `v<version>` -- the format every family member's own repo already uses for its release tags (verified against each member's existing `git tag` output, e.g. `v5.6.0`). */
+export function releaseTagName(version: string): string {
+  return `v${version}`;
+}
+
+export interface MemberTagPushOutcome {
+  name: string;
+  tag: string;
+  /** Undefined only when the branch itself could not be resolved (refused). */
+  branch?: string;
+  /** True when a NEW local tag was created this run. */
+  tagged: boolean;
+  /** True when the local tag already existed, at the recorded sha -- a no-op success. */
+  alreadyTagged: boolean;
+  /** True when the tag was pushed to origin this run. */
+  tagPushed: boolean;
+  /** True when origin already carried this tag at the recorded sha -- a no-op success. */
+  tagAlreadyPushed: boolean;
+  /** True when the branch ref was pushed to the recorded sha this run. */
+  pushed: boolean;
+  /** True when origin's branch ref was already at the recorded sha -- a no-op success. */
+  alreadyPushed: boolean;
+  refused: boolean;
+  /** Names this member, the branch, and the offending commits/shas -- empty when not refused. */
+  refusalMessage: string;
+}
+
+function refusedTagPushOutcome(
+  name: string,
+  tag: string,
+  refusalMessage: string,
+  branch?: string,
+): MemberTagPushOutcome {
+  return {
+    name,
+    tag,
+    branch,
+    tagged: false,
+    alreadyTagged: false,
+    tagPushed: false,
+    tagAlreadyPushed: false,
+    pushed: false,
+    alreadyPushed: false,
+    refused: true,
+    refusalMessage,
+  };
+}
+
+/**
+ * Resolve the branch currently checked out in one member's OWN repo.
+ *
+ * These are 28 independent repositories -- nothing here may assume a branch
+ * name (e.g. "main"). `create-warlock` today is checked out on a feature
+ * branch, not "main", which is exactly the case a hard-coded name would miss.
+ */
+async function resolveMemberBranch(member: WarlockFamilyMember, runtime: Runtime): Promise<string> {
+  const result = await runtime.runCommand({
+    command: "git",
+    args: ["rev-parse", "--abbrev-ref", "HEAD"],
+    cwd: member.root,
+    env: { ...process.env },
+  });
+  const branch = result.stdout.trim();
+  if (!branch || branch === "HEAD") {
+    throw new Error(`Cannot resolve a branch for ${member.name}: HEAD is detached (got "${branch}").`);
+  }
+  return branch;
+}
+
+/** The commit a remote ref (a branch or a tag) currently points at, or undefined when the ref does not exist at origin. Never requires a local fetch. */
+async function resolveOriginRefSha(
+  member: WarlockFamilyMember,
+  ref: string,
+  runtime: Runtime,
+): Promise<string | undefined> {
+  const result = await runtime.runCommand({
+    command: "git",
+    args: ["ls-remote", "origin", ref],
+    cwd: member.root,
+    env: { ...process.env },
+  });
+  const line = result.stdout.split(/\r?\n/).find(value => value.trim().length > 0);
+  if (!line) return undefined;
+  const sha = line.split(/\s+/)[0]?.toLowerCase();
+  if (!sha || !/^[0-9a-f]{40}$/.test(sha)) {
+    throw new Error(`Cannot parse "git ls-remote origin ${ref}" output for ${member.name}: "${line}".`);
+  }
+  return sha;
+}
+
+async function isAncestorCommit(
+  member: WarlockFamilyMember,
+  ancestorSha: string,
+  descendantSha: string,
+  runtime: Runtime,
+): Promise<boolean> {
+  try {
+    await runtime.runCommand({
+      command: "git",
+      args: ["merge-base", "--is-ancestor", ancestorSha, descendantSha],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Best-effort: the offending commits are for the refusal message, never load-bearing to the refusal itself. */
+async function listCommitsBetween(
+  member: WarlockFamilyMember,
+  fromExclusiveSha: string,
+  toInclusiveSha: string,
+  runtime: Runtime,
+): Promise<readonly string[]> {
+  try {
+    const result = await runtime.runCommand({
+      command: "git",
+      args: ["log", "--oneline", `${fromExclusiveSha}..${toInclusiveSha}`],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    return result.stdout.split(/\r?\n/).filter(line => line.trim().length > 0);
+  } catch {
+    return [];
+  }
+}
+
+/** The local tag's sha, or undefined when no such tag exists locally yet. */
+async function resolveLocalTagSha(
+  member: WarlockFamilyMember,
+  tag: string,
+  runtime: Runtime,
+): Promise<string | undefined> {
+  try {
+    const result = await runtime.runCommand({
+      command: "git",
+      args: ["rev-parse", "--verify", `refs/tags/${tag}^{commit}`],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    return result.stdout.trim().toLowerCase();
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Tag and push ONE family member at its recorded `releaseCommitSha` -- never
+ * at HEAD, which may have moved since the build.
+ *
+ * Idempotent by construction: a tag that already exists at the SAME sha, or
+ * a branch/tag ref already at the recorded sha at origin, is reported as a
+ * no-op success, never redone. A tag or ref that exists at a DIFFERENT sha is
+ * a refusal -- this never passes `--force`.
+ */
+export async function tagAndPushMember(
+  member: WarlockFamilyMember,
+  version: string,
+  releaseCommitSha: string,
+  runtime: Runtime,
+): Promise<MemberTagPushOutcome> {
+  const sha = releaseCommitSha.toLowerCase();
+  const tag = releaseTagName(version);
+
+  let branch: string;
+  try {
+    branch = await resolveMemberBranch(member, runtime);
+  } catch (error) {
+    return refusedTagPushOutcome(member.name, tag, formatError(error));
+  }
+
+  // Refuse rather than push something unexpected: origin's current branch
+  // tip must be an ancestor of (or equal to) the recorded release commit. If
+  // it is not, origin carries commits this release does not account for.
+  const originBranchTip = await resolveOriginRefSha(member, `refs/heads/${branch}`, runtime);
+  if (originBranchTip && originBranchTip !== sha) {
+    const isAncestor = await isAncestorCommit(member, originBranchTip, sha, runtime);
+    if (!isAncestor) {
+      const offending = await listCommitsBetween(member, sha, originBranchTip, runtime);
+      return refusedTagPushOutcome(
+        member.name,
+        tag,
+        [
+          `Refusing to push ${member.name}: origin/${branch} (${originBranchTip}) is not an ` +
+            `ancestor of the recorded release commit ${sha}.`,
+          `Branch: ${branch}`,
+          offending.length > 0
+            ? `Commits on origin/${branch} beyond ${sha}:`
+            : `origin/${branch} could not be explained relative to ${sha}.`,
+          ...offending.map(line => `  - ${line}`),
+        ].join("\n"),
+        branch,
+      );
+    }
+  }
+
+  let tagged = false;
+  let alreadyTagged = false;
+  const localTagSha = await resolveLocalTagSha(member, tag, runtime);
+  if (localTagSha) {
+    if (localTagSha !== sha) {
+      return refusedTagPushOutcome(
+        member.name,
+        tag,
+        `Refusing to move tag ${tag} for ${member.name}: it already exists locally at ` +
+          `${localTagSha}, not the recorded release commit ${sha}. Never moved with --force.`,
+        branch,
+      );
+    }
+    alreadyTagged = true;
+  } else {
+    await runtime.runCommand({
+      command: "git",
+      args: ["tag", tag, sha],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    tagged = true;
+  }
+
+  let tagPushed = false;
+  let tagAlreadyPushed = false;
+  const originTagSha = await resolveOriginRefSha(member, `refs/tags/${tag}`, runtime);
+  if (originTagSha) {
+    if (originTagSha !== sha) {
+      return refusedTagPushOutcome(
+        member.name,
+        tag,
+        `Refusing to move tag ${tag} for ${member.name} at origin: it already exists there at ` +
+          `${originTagSha}, not the recorded release commit ${sha}. Never moved with --force.`,
+        branch,
+      );
+    }
+    tagAlreadyPushed = true;
+  } else {
+    await runtime.runCommand({
+      command: "git",
+      args: ["push", "origin", `refs/tags/${tag}`],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    tagPushed = true;
+  }
+
+  let pushed = false;
+  let alreadyPushed = false;
+  if (originBranchTip === sha) {
+    alreadyPushed = true;
+  } else {
+    // The recorded sha, never the branch tip: anything committed after the
+    // build is structurally excluded from what reaches origin here.
+    await runtime.runCommand({
+      command: "git",
+      args: ["push", "origin", `${sha}:refs/heads/${branch}`],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+    pushed = true;
+  }
+
+  return {
+    name: member.name,
+    tag,
+    branch,
+    tagged,
+    alreadyTagged,
+    tagPushed,
+    tagAlreadyPushed,
+    pushed,
+    alreadyPushed,
+    refused: false,
+    refusalMessage: "",
+  };
+}
+
+/**
+ * Tag and push every family member named in the handoff, at each member's
+ * own `releaseCommitSha` recorded in `build-provenance.json` -- read back
+ * here rather than threaded through the handoff, exactly as `confirmAtOrigin`
+ * reads the handoff rather than re-deriving it.
+ *
+ * One member's refusal never stops the other 27: every member gets its own
+ * independent attempt, and this throws once at the end with every refusal
+ * joined -- the same shape as the gate's own per-member refusals.
+ */
+export async function tagAndPushAllMembers(
+  family: WarlockFamily,
+  handoff: ReleaseHandoff,
+  version: string,
+  runtime: Runtime,
+): Promise<readonly MemberTagPushOutcome[]> {
+  const artifactDirectory = path.join(ARTIFACT_ROOT, version);
+  const provenance = await readProvenance(artifactDirectory, version, runtime);
+  if (!provenance) {
+    throw new Error(
+      `Refusing to tag/push: no build-provenance.json for version ${version} in ` +
+        `${artifactDirectory} -- cannot recover each member's recorded release commit.`,
+    );
+  }
+  const provenanceByName = new Map(provenance.members.map(entry => [entry.name, entry]));
+  const membersByName = new Map(family.members.map(member => [member.name, member]));
+
+  const results: MemberTagPushOutcome[] = [];
+  const refusals: string[] = [];
+
+  for (const name of handoff.subjects) {
+    const member = membersByName.get(name);
+    const entry = provenanceByName.get(name);
+    if (!member || !entry) {
+      const message =
+        `Refusing to tag/push ${name}: no recorded release-commit sha in build-provenance.json ` +
+        `for version ${version}.`;
+      console.warn(`[release-family] REFUSED (tag/push) ${name}: ${message}`);
+      refusals.push(message);
+      continue;
+    }
+
+    const outcome = await tagAndPushMember(member, version, entry.releaseCommitSha, runtime);
+    results.push(outcome);
+
+    if (outcome.refused) {
+      console.warn(`[release-family] REFUSED (tag/push) ${name}: ${outcome.refusalMessage}`);
+      refusals.push(outcome.refusalMessage);
+    } else {
+      console.warn(
+        `[release-family] ${name} @ ${entry.releaseCommitSha}: tag ${outcome.tag} ` +
+          `${outcome.alreadyTagged ? "already existed locally" : "created"}, ` +
+          `${outcome.tagAlreadyPushed ? "already at origin" : "pushed to origin"}; ` +
+          `branch ${outcome.branch} ${outcome.alreadyPushed ? "already at that commit" : "pushed"}.`,
+      );
+    }
+  }
+
+  if (refusals.length > 0) {
+    throw new Error(refusals.join("\n\n"));
+  }
+
+  return results;
 }
 
 function assertGeneratedPins(manifest: BuiltManifest, version: string): void {
