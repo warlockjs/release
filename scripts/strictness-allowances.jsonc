@@ -6,7 +6,7 @@
   // The resulting rise for formerly lenient packages is truth arriving, not a
   // regression. From this re-seeded baseline, these numbers may only go DOWN.
   // `builder` has no TypeScript config, so it is unmeasured, not zero.
-  "access": 1,
+  "access": 0,
   "ai": 463,
   "ai-anthropic": 47,
   "ai-bedrock": 44,
