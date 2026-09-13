@@ -104,6 +104,8 @@ const __dirname = path.dirname(__filename);
 /** builder/scripts -> builder -> repo root. */
 export const REPO_ROOT = path.resolve(__dirname, "..", "..");
 export const GATE_TMP_DIR_NAME = ".skill-snippet-gate-tmp";
+/** The committed ratchet baseline the gate reads. */
+export const ALLOWANCES_PATH = path.join(__dirname, "skill-snippet-allowances.jsonc");
 
 export interface WorkspacePackage {
   /** Directory name at the repo root, e.g. "core". */
@@ -607,6 +609,81 @@ export function runSkillSnippetGate(repoRoot: string): GateReport {
   return { packages, skills, results, typePathConflicts };
 }
 
+/**
+ * Reads the committed per-package ratchet baseline. Same `.jsonc` shape and
+ * same "these numbers may only go DOWN" contract as `strictness-allowances.jsonc`
+ * — the value is the number of failing compiled snippets a package is allowed to
+ * still carry, measured at baseline. A new failure pushes a package OVER and
+ * fails the gate; a fixed one can only lower a baseline.
+ */
+export function readAllowances(filePath = ALLOWANCES_PATH): Record<string, number> {
+  const parsed = ts.parseConfigFileTextToJson(filePath, readFileSync(filePath, "utf8"));
+  if (parsed.error || !parsed.config || typeof parsed.config !== "object") {
+    throw new Error(`Cannot read skill-snippet allowances at ${filePath}.`);
+  }
+  return parsed.config as Record<string, number>;
+}
+
+export interface PackageFailureCount {
+  /** Package directory name, e.g. "core". */
+  dir: string;
+  /** Compiled snippets in this package that failed to type-check. */
+  failed: number;
+}
+
+/**
+ * Counts failing COMPILED snippets per package from a gate report. A snippet is
+ * "failed" when its compiled file carried at least one compiler diagnostic —
+ * exactly the pass/fail unit `formatReport` already prints. Skipped fragments
+ * are never counted. Cross-skill type/path conflicts are tracked separately (a
+ * hard zero, not allowanced) and are not part of this per-package tally.
+ */
+export function countFailuresByPackage(report: GateReport): PackageFailureCount[] {
+  const byDir = new Map<string, number>();
+  for (const pkg of report.packages) byDir.set(pkg.dir, 0);
+  for (const result of report.results) {
+    const dir = result.skill.package.dir;
+    const failed = result.files.filter((file) => file.diagnostics.length > 0).length;
+    byDir.set(dir, (byDir.get(dir) ?? 0) + failed);
+  }
+  return [...byDir.entries()].map(([dir, failed]) => ({ dir, failed })).sort((a, b) => a.dir.localeCompare(b.dir));
+}
+
+export interface RatchetReport {
+  /** Per-package failing count against its recorded allowance. */
+  rows: Array<{ dir: string; failed: number; allowance: number; over: number }>;
+  /** Total failing compiled snippets across every package. */
+  totalFailed: number;
+  /** Sum of every recorded allowance — the stated, tracked scope. */
+  totalAllowance: number;
+  /** Cross-skill type/path conflicts — held at a hard zero, never allowanced. */
+  typePathConflicts: number;
+  /** True when any package is OVER its allowance, has no allowance, or a conflict exists. */
+  failed: boolean;
+}
+
+/**
+ * Evaluates the report against the committed baseline: a package OVER its
+ * allowance fails; a measured package with NO recorded allowance fails (an
+ * unmeasured allowance is never silently treated as zero, matching
+ * `strictness-gate.ts`); any cross-skill type/path conflict fails (hard zero).
+ */
+export function evaluateRatchet(report: GateReport, allowances: Record<string, number>): RatchetReport {
+  const counts = countFailuresByPackage(report);
+  const rows = counts.map(({ dir, failed }) => {
+    const allowance = allowances[dir];
+    if (allowance === undefined) {
+      throw new Error(`No skill-snippet allowance recorded for package '${dir}'. Add it to ${path.basename(ALLOWANCES_PATH)}.`);
+    }
+    return { dir, failed, allowance, over: failed - allowance };
+  });
+  const totalFailed = rows.reduce((sum, row) => sum + row.failed, 0);
+  const totalAllowance = rows.reduce((sum, row) => sum + row.allowance, 0);
+  const typePathConflicts = report.typePathConflicts.length;
+  const failed = rows.some((row) => row.over > 0) || typePathConflicts > 0;
+  return { rows, totalFailed, totalAllowance, typePathConflicts, failed };
+}
+
 function formatReport(report: GateReport): { text: string; failed: boolean } {
   const lines: string[] = [];
   let totalBlocks = 0;
@@ -664,11 +741,27 @@ function formatReport(report: GateReport): { text: string; failed: boolean } {
   return { text: lines.join("\n"), failed: totalFailed > 0 || report.typePathConflicts.length > 0 };
 }
 
+function formatRatchet(ratchet: RatchetReport): string {
+  const lines: string[] = ["--- ratchet (failing compiled snippets / allowance; baseline may only go DOWN) ---"];
+  for (const row of ratchet.rows) {
+    const status = row.over > 0 ? ` OVER by ${row.over}` : row.failed < row.allowance ? ` (${row.allowance - row.failed} under — lower the baseline)` : " OK";
+    lines.push(`  ${row.dir}: ${row.failed} / ${row.allowance}${status}`);
+  }
+  lines.push("");
+  lines.push(`total failing: ${ratchet.totalFailed} / ${ratchet.totalAllowance} allowance`);
+  lines.push(`cross-skill type/path conflicts: ${ratchet.typePathConflicts} (hard zero — never allowanced)`);
+  lines.push(ratchet.failed ? "RATCHET FAILED: a package is OVER its allowance (a NEW failure) or a conflict exists." : "RATCHET OK: no package exceeds its recorded baseline.");
+  return lines.join("\n");
+}
+
 async function main(): Promise<number> {
   const report = runSkillSnippetGate(REPO_ROOT);
-  const { text, failed } = formatReport(report);
+  const { text } = formatReport(report);
   console.log(text);
-  return failed ? 1 : 0;
+  const ratchet = evaluateRatchet(report, readAllowances());
+  console.log("");
+  console.log(formatRatchet(ratchet));
+  return ratchet.failed ? 1 : 0;
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === __filename;

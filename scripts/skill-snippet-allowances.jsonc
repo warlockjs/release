@@ -1,0 +1,49 @@
+{
+  // Skill-snippet compile ratchet baseline, measured on 2026-09-13 with:
+  //   `node --import tsx builder/scripts/skill-snippet-gate.ts`
+  //
+  // Each number is the count of COMPILED skill snippets (see skill-snippet-gate.ts
+  // for what "compiled" means: titled blocks, or untitled blocks that carry their
+  // own imports) that currently FAIL to type-check, per shipping package. This is a
+  // STATED, TRACKED allowance — the same shape as strictness-allowances.jsonc — not
+  // an endorsement of the failures. A new failure in any package pushes that
+  // package OVER its allowance and fails the gate. From this baseline, these
+  // numbers may only go DOWN.
+  //
+  // Total across all packages at baseline: 314 failing compiled snippets
+  // (526 compiled, 212 passing, 857 skipped as deliberate fragments, 0 cross-skill
+  // type/path conflicts). Cross-skill type/path conflicts are held at a hard zero
+  // by the gate and are NOT allowanced here.
+  //
+  // Every package that ships a skills/ tree MUST have an entry here: a measured
+  // package with no recorded allowance fails the gate (an unmeasured allowance is
+  // never silently treated as zero).
+  "access": 9,
+  "ai": 48,
+  "ai-anthropic": 0,
+  "ai-bedrock": 0,
+  "ai-deepseek": 0,
+  "ai-google": 0,
+  "ai-groq": 0,
+  "ai-live": 3,
+  "ai-mistral": 0,
+  "ai-ollama": 0,
+  "ai-openai": 0,
+  "ai-panoptic": 17,
+  "ai-tools": 4,
+  "ai-workspace": 2,
+  "ai-xai": 0,
+  "auth": 18,
+  "cache": 7,
+  "cascade": 17,
+  "context": 2,
+  "core": 141,
+  "create-warlock": 0,
+  "fs": 7,
+  "herald": 6,
+  "logger": 8,
+  "notifications": 11,
+  "scheduler": 6,
+  "seal": 7,
+  "web": 1
+}

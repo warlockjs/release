@@ -7,12 +7,18 @@ import {
   REPO_ROOT,
   classifyBlock,
   compileSkill,
+  countFailuresByPackage,
   discoverPackages,
   discoverSkillFiles,
+  evaluateRatchet,
   extractFencedBlocks,
   findCrossSkillTypePathConflicts,
   planSkillCompileUnit,
+  readAllowances,
   type DiscoveredSkill,
+  type ExtractedBlock,
+  type GateReport,
+  type SkillCompileResult,
   type WorkspacePackage,
 } from "../skill-snippet-gate.ts";
 
@@ -239,6 +245,88 @@ describe("compileSkill — real compilation against real declarations, with a re
     const result = compileSkill(skill, [pkg], path.join(root, ".gate-tmp"));
     assert.equal(result.files.length, 1);
     assert.ok(result.files[0].diagnostics.some((d) => /Cannot find module/.test(d)));
+  });
+});
+
+describe("ratchet — per-package baseline enforcement", () => {
+  const pkgA: WorkspacePackage = { dir: "a", absPath: "/a", name: "@fixture/a" };
+  const pkgB: WorkspacePackage = { dir: "b", absPath: "/b", name: "@fixture/b" };
+
+  function block(skill: DiscoveredSkill): ExtractedBlock {
+    return { skill, index: 0, lang: "ts", info: "", body: "", line: 1 };
+  }
+
+  function resultWith(pkg: WorkspacePackage, slug: string, failedCount: number, passedCount: number): SkillCompileResult {
+    const skill = skillFor(pkg, slug, `/${pkg.dir}/skills/${slug}/SKILL.md`);
+    const files = [
+      ...Array.from({ length: failedCount }, (_, i) => ({
+        virtualPath: `fail-${i}.ts`,
+        absolutePath: `/tmp/fail-${i}.ts`,
+        block: block(skill),
+        diagnostics: ["x.ts(1,1): error TS2304: Cannot find name 'x'."],
+      })),
+      ...Array.from({ length: passedCount }, (_, i) => ({
+        virtualPath: `ok-${i}.ts`,
+        absolutePath: `/tmp/ok-${i}.ts`,
+        block: block(skill),
+        diagnostics: [] as string[],
+      })),
+    ];
+    return { skill, skillRoot: `/tmp/${pkg.dir}/${slug}`, tsconfigPath: `/tmp/${pkg.dir}/${slug}/tsconfig.json`, files, skipped: [], duplicateTitles: [] };
+  }
+
+  function reportWith(results: SkillCompileResult[], packages: WorkspacePackage[], conflicts: GateReport["typePathConflicts"] = []): GateReport {
+    return { packages, skills: results.map((r) => r.skill), results, typePathConflicts: conflicts };
+  }
+
+  it("counts failing compiled snippets per package, ignoring passing ones", () => {
+    const report = reportWith(
+      [resultWith(pkgA, "s1", 2, 1), resultWith(pkgA, "s2", 1, 3), resultWith(pkgB, "s3", 0, 2)],
+      [pkgA, pkgB],
+    );
+    assert.deepEqual(countFailuresByPackage(report), [
+      { dir: "a", failed: 3 },
+      { dir: "b", failed: 0 },
+    ]);
+  });
+
+  it("passes when every package is at or under its allowance", () => {
+    const report = reportWith([resultWith(pkgA, "s1", 3, 0), resultWith(pkgB, "s2", 0, 1)], [pkgA, pkgB]);
+    const ratchet = evaluateRatchet(report, { a: 3, b: 0 });
+    assert.equal(ratchet.failed, false);
+    assert.equal(ratchet.totalFailed, 3);
+    assert.equal(ratchet.totalAllowance, 3);
+  });
+
+  it("RED CONTROL: one NEW failure over the baseline fails the ratchet", () => {
+    const report = reportWith([resultWith(pkgA, "s1", 4, 0), resultWith(pkgB, "s2", 0, 1)], [pkgA, pkgB]);
+    const ratchet = evaluateRatchet(report, { a: 3, b: 0 });
+    assert.equal(ratchet.failed, true);
+    assert.equal(ratchet.rows.find((r) => r.dir === "a")?.over, 1);
+  });
+
+  it("a cross-skill type/path conflict fails the ratchet even at a clean baseline (hard zero)", () => {
+    const report = reportWith([resultWith(pkgA, "s1", 0, 1)], [pkgA], [
+      { typeName: "Product", occurrences: [] },
+    ]);
+    const ratchet = evaluateRatchet(report, { a: 0 });
+    assert.equal(ratchet.failed, true);
+    assert.equal(ratchet.typePathConflicts, 1);
+  });
+
+  it("a measured package with no recorded allowance throws (never silently treated as zero)", () => {
+    const report = reportWith([resultWith(pkgA, "s1", 1, 0)], [pkgA]);
+    assert.throws(() => evaluateRatchet(report, {}), /No skill-snippet allowance recorded for package 'a'/);
+  });
+
+  it("the committed baseline is valid JSONC with numeric allowances", () => {
+    const allowances = readAllowances();
+    for (const [dir, value] of Object.entries(allowances)) {
+      assert.equal(typeof value, "number", `allowance for '${dir}' must be a number`);
+      assert.ok(value >= 0, `allowance for '${dir}' must be >= 0`);
+    }
+    // Sanity: the baseline recorded at authoring time.
+    assert.equal(Object.values(allowances).reduce((sum, n) => sum + n, 0), 314);
   });
 });
 
