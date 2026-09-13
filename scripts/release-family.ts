@@ -9,7 +9,7 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
@@ -1286,6 +1286,26 @@ export async function commitMemberReleaseEdits(
       cwd: member.root,
       env: { ...process.env },
     });
+
+    // The gate reconciles the family version from SOURCE, so a release run
+    // always starts from manifests already committed at `version` -- and
+    // pkgist's rewrite of an already-bumped manifest is then a no-op. That
+    // is not a failure: there is nothing to commit, and HEAD is already the
+    // commit the tarball is built from. Asked explicitly rather than inferred
+    // from `git commit` failing, because a refused hook fails the same way
+    // and must still refuse this member.
+    const staged = await runtime.runCommand({
+      command: "git",
+      args: ["diff", "--cached", "--name-only", "--", ...paths],
+      cwd: member.root,
+      env: { ...process.env },
+    });
+
+    if (staged.stdout.trim().length === 0) {
+      const head = await getGitHead(member, runtime);
+      return { committed: true, refusalMessage: "", sha: head };
+    }
+
     await runtime.runCommand({
       command: "git",
       args: ["commit", "-m", `release: ${member.name}@${version}`, "--", ...paths],
@@ -1496,15 +1516,32 @@ export function assertBuiltManifest(
   }
 }
 
+/**
+ * The publish npmrc is hermetic (its own registry + cache), so it does not read
+ * the user's ~/.npmrc — which means the auth token has to come from somewhere.
+ * NPM_TOKEN wins when set (CI); otherwise fall back to the token the user already
+ * configured globally via `npm login` / ~/.npmrc, so an interactive release never
+ * has to re-export NPM_TOKEN each time. The raw token is only ever written into
+ * the temporary publish npmrc below, never logged.
+ */
+function resolveNpmAuthToken(): string | undefined {
+  if (process.env.NPM_TOKEN) return process.env.NPM_TOKEN;
+  const userNpmrc = path.join(homedir(), ".npmrc");
+  if (!existsSync(userNpmrc)) return undefined;
+  const match = readFileSync(userNpmrc, "utf8").match(
+    /^\/\/registry\.npmjs\.org\/:_authToken\s*=\s*(.+?)\s*$/m,
+  );
+  return match ? match[1] : undefined;
+}
+
 async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promise<void> {
   const root = await runtime.makeTemporaryDirectory("warlock-origin-publish-");
   const cache = path.join(root, "npm-cache");
   const userconfig = path.join(root, "user.npmrc");
   const globalconfig = path.join(root, "global.npmrc");
   await runtime.makeDirectory(cache);
-  const tokenLine = process.env.NPM_TOKEN
-    ? `//registry.npmjs.org/:_authToken=${process.env.NPM_TOKEN}\n`
-    : "";
+  const npmToken = resolveNpmAuthToken();
+  const tokenLine = npmToken ? `//registry.npmjs.org/:_authToken=${npmToken}\n` : "";
   await runtime.writeTextFile(userconfig, `registry=${NPM_ORIGIN}\nalways-auth=true\n${tokenLine}`);
   await runtime.writeTextFile(globalconfig, "");
   const env = originEnvironment(process.env, cache, userconfig, globalconfig);
