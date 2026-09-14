@@ -39,6 +39,7 @@ import {
   runZeroEditGeneratorGate,
   type GeneratorGateContext,
 } from "./zero-edit-generator-gate.ts";
+import { runStrictnessGate, type StrictnessGateRunResult } from "./strictness-gate.ts";
 
 export const NPM_ORIGIN = "https://registry.npmjs.org";
 export const EXACT_VERSION =
@@ -123,7 +124,25 @@ export interface ReleaseOptions {
    * here is REPORTED as an override in the run output when it is used.
    */
   allowNonDefaultBranchFor?: readonly string[];
+  /**
+   * Opt-in: skip the workspace strictness ratchet for this gate run, quoting
+   * the reason. NEVER defaulted and NEVER silent -- an empty or missing
+   * reason is an argument error (see `assertSkipStrictnessReasonIsStated`),
+   * and a used skip is always recorded in the handoff so it reaches the
+   * release summary the same way `matrixScope` does.
+   */
+  skipStrictness?: string;
 }
+
+/**
+ * How the workspace strictness ratchet stood for this gate run: either it
+ * ran and every package was within its allowance, or it was explicitly
+ * skipped for a stated reason. There is no third, unstated case -- a gate
+ * run that produces a handoff always sets exactly one of these.
+ */
+export type StrictnessGateOutcome =
+  | { status: "passed" }
+  | { status: "skipped"; reason: string };
 
 /**
  * An owner authorisation to run the matrix, as it must appear in the release
@@ -184,6 +203,13 @@ export interface ReleaseHandoff extends PublishHandoff {
   reusedArtifacts?: boolean;
   /** The exact provenance proving each reused artifact is still valid -- carried into the handoff so the fact is never lost. */
   reuseProvenance?: readonly BuildProvenanceEntry[];
+  /**
+   * How the workspace strictness ratchet stood for this gate run. Optional
+   * only so `publish`/`confirm` mode TOLERATES a handoff written before this
+   * field existed -- a gate run always sets it (see `prepareAndGate`), and a
+   * missing value is never treated as "passed".
+   */
+  strictness?: StrictnessGateOutcome;
 }
 
 export interface CommandRequest {
@@ -227,6 +253,14 @@ export interface ReleaseFamilyDependencies {
     input: LocalRegistryGateInput,
     dependencies: LocalRegistryGateDependencies,
   ): Promise<PublishHandoff>;
+  /**
+   * The workspace strictness ratchet (`strictness-gate.ts`), run ONCE over
+   * the whole family before any member is built or packed -- never
+   * per-member, and never shelled back out to that file as a subprocess.
+   * Injectable so tests substitute a fake result instead of compiling 28
+   * real packages.
+   */
+  runStrictnessGate?(): Promise<StrictnessGateRunResult>;
   now?(): Date;
   /** Every operator-facing progress/summary line goes through this, never a bare `console.log`. */
   report?(line: string): void;
@@ -279,6 +313,7 @@ export async function runReleaseFamily(
       only: options.only,
       matrixAuthorisation: options.matrixAuthorisation,
       allowNonDefaultBranchFor: options.allowNonDefaultBranchFor,
+      skipStrictness: assertSkipStrictnessReasonIsStated(options.skipStrictness),
     });
   }
 
@@ -307,6 +342,33 @@ export interface PrepareAndGateOptions {
   only?: readonly string[];
   matrixAuthorisation?: MatrixAuthorisation;
   allowNonDefaultBranchFor?: readonly string[];
+  /** Already-validated (trimmed, non-empty) by `assertSkipStrictnessReasonIsStated`. */
+  skipStrictness?: string;
+}
+
+/**
+ * Refuse a skip with no stated reason -- never silent, never defaulted.
+ *
+ * `undefined` (the flag was never passed) means "run the ratchet" and is
+ * returned as-is. Anything present but blank is refused outright: a skip
+ * that could not be attributed to a reason is exactly the silent
+ * degradation `--skip-strictness` exists to avoid, mirroring
+ * `assertMatrixScopeIsStated`'s refusal of an unstated matrix scope.
+ */
+export function assertSkipStrictnessReasonIsStated(reason: string | undefined): string | undefined {
+  if (reason === undefined) return undefined;
+  if (!reason.trim()) {
+    throw new Error(
+      [
+        "Refusing to gate: --skip-strictness requires a reason, quoted.",
+        'Pass --skip-strictness "<reason>" -- e.g. --skip-strictness "web is mid-refactor, tracked in card 9f".',
+        "",
+        "Skipping the strictness ratchet is allowed, but never silently: the reason is carried",
+        "into the handoff exactly like matrixScope, so a skipped release states why.",
+      ].join("\n"),
+    );
+  }
+  return reason.trim();
 }
 
 /**
@@ -429,6 +491,16 @@ async function prepareAndGate(
     );
   }
 
+  // The strictness ratchet runs ONCE over the whole family, before any
+  // member is built or packed -- unlike `checkPackageOwnQuality` above,
+  // which is deliberately per-member so one red package cannot take the
+  // other 27 down with it. This check is a workspace-wide measurement (see
+  // `strictness-gate.ts`): there is no meaningful "per-member" slice of it,
+  // and running it after 28 builds would waste the whole build for a defect
+  // this could have caught first. OVER allowance or UNMEASURED refuses the
+  // gate outright, with no handoff, same as every other refusal below.
+  const strictness = await runStrictnessRatchet(options.skipStrictness, runtime);
+
   let artifacts: CandidateArtifact[] | undefined;
   let reusedArtifacts = false;
   let reuseProvenance: BuildProvenanceEntry[] | undefined;
@@ -488,6 +560,7 @@ async function prepareAndGate(
     ...gated,
     artifacts: gated.artifacts.map(artifact => ({ ...artifact })),
     subjects: family.members.map(member => member.name),
+    strictness,
     ...(options.matrixAuthorisation ? { matrixAuthorisation: options.matrixAuthorisation } : {}),
     ...(reusedArtifacts ? { reusedArtifacts: true, reuseProvenance } : {}),
   };
@@ -495,6 +568,50 @@ async function prepareAndGate(
 
   await runtime.writeHandoff(handoffPath, handoff);
   return handoff;
+}
+
+/**
+ * Run the workspace strictness ratchet once, or honour an explicit
+ * `--skip-strictness "<reason>"` instead of running it at all.
+ *
+ * OVER allowance or UNMEASURED refuses the gate: no handoff is produced, and
+ * the refusal names every offending package by directory, its owned
+ * diagnostic count and its allowance -- the gate's normal refusal shape,
+ * matching `checkPackageOwnQuality`'s per-member refusals.
+ */
+async function runStrictnessRatchet(
+  skipReason: string | undefined,
+  runtime: Runtime,
+): Promise<StrictnessGateOutcome> {
+  if (skipReason !== undefined) {
+    runtime.report(
+      `[release-family] STRICTNESS GATE SKIPPED (--skip-strictness "${skipReason}"): the workspace ` +
+        "strictness ratchet did not run for this release. Recorded in the handoff.",
+    );
+    return { status: "skipped", reason: skipReason };
+  }
+
+  const result = await runtime.runStrictnessGate();
+  if (result.passed) {
+    return { status: "passed" };
+  }
+
+  const offenders = result.packages.filter(pkg => pkg.unmeasured || pkg.over > 0);
+  throw new Error(
+    [
+      "Refusing to gate: the workspace strictness ratchet is red.",
+      ...offenders.map(pkg =>
+        pkg.unmeasured
+          ? `  - ${pkg.dir}: UNMEASURED`
+          : `  - ${pkg.dir}: ${pkg.count} owned diagnostics / allowance ${pkg.allowance} (OVER by ${pkg.over})`,
+      ),
+      "",
+      result.text,
+      "",
+      `Fix: bring the offending package(s) back within their strictness allowance, or pass ` +
+        '--skip-strictness "<reason>" to explicitly waive this run (recorded in the handoff).',
+    ].join("\n"),
+  );
 }
 
 async function buildAndPackAllMembers(
@@ -1536,6 +1653,18 @@ function resolveNpmAuthToken(): string | undefined {
 }
 
 async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promise<void> {
+  // Printed, not silently carried: an operator running `publish` reads this
+  // handoff's own report, not the gate's console output from a possibly
+  // earlier, possibly different terminal session. A handoff written before
+  // this field existed has no `strictness` at all -- TOLERATED, not refused
+  // (see `parseHandoffStrictness`) -- and nothing is printed for it.
+  if (handoff.strictness) {
+    runtime.report(
+      handoff.strictness.status === "passed"
+        ? "[release-family] strictness gate: passed"
+        : `[release-family] strictness gate: SKIPPED (${handoff.strictness.reason})`,
+    );
+  }
   const root = await runtime.makeTemporaryDirectory("warlock-origin-publish-");
   const cache = path.join(root, "npm-cache");
   const userconfig = path.join(root, "user.npmrc");
@@ -2213,6 +2342,7 @@ function parseAndValidateHandoff(
   const matrixScope = parseHandoffMatrixScope(record.matrixScope);
   const matrixRows = parseHandoffMatrixRows(record.matrixRows);
   assertMatrixScopeAgreesWithRows(matrixScope, matrixRows);
+  const strictness = parseHandoffStrictness(record.strictness);
   const handoff = {
     kind: record.kind,
     candidateVersion: version,
@@ -2224,6 +2354,7 @@ function parseAndValidateHandoff(
     ...(record.matrixAuthorisation
       ? { matrixAuthorisation: record.matrixAuthorisation as MatrixAuthorisation }
       : {}),
+    ...(strictness ? { strictness } : {}),
   } satisfies ReleaseHandoff;
   const expected = family.members.map(member => member.name);
   if (!equalStrings(handoff.subjects, expected)) {
@@ -2258,6 +2389,24 @@ function parseHandoffMatrixScope(value: unknown): MatrixScope {
       "docs/src/data/releases.json.",
     ].join("\n"),
   );
+}
+
+/**
+ * TOLERATES an absent value -- unlike `parseHandoffMatrixScope`, a handoff
+ * written before the strictness ratchet was wired in is not refused here;
+ * `publishHandoff` reports that plainly rather than inventing a status.
+ */
+function parseHandoffStrictness(value: unknown): StrictnessGateOutcome | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object") {
+    throw new Error(`Publish handoff strictness must be an object when present (found ${JSON.stringify(value)}).`);
+  }
+  const record = value as Record<string, unknown>;
+  if (record.status === "passed") return { status: "passed" };
+  if (record.status === "skipped" && typeof record.reason === "string" && record.reason.trim().length > 0) {
+    return { status: "skipped", reason: record.reason };
+  }
+  throw new Error(`Publish handoff carries an invalid strictness record: ${JSON.stringify(value)}.`);
 }
 
 function parseHandoffMatrixRows(value: unknown): readonly string[] | undefined {
@@ -2372,10 +2521,15 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
     resolvePnpmCli: dependencies.resolvePnpmCli ?? resolvePnpmCli,
     resolvePackageScript: dependencies.resolvePackageScript ?? resolveLocalPackageScript,
     runLocalGate: dependencies.runLocalGate ?? runLocalRegistryPreGate,
+    runStrictnessGate: dependencies.runStrictnessGate ?? defaultRunStrictnessGate,
     now: dependencies.now ?? (() => new Date()),
     report: dependencies.report ?? (line => console.log(line)),
     sleep: dependencies.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))),
   };
+}
+
+async function defaultRunStrictnessGate(): Promise<StrictnessGateRunResult> {
+  return runStrictnessGate();
 }
 
 async function defaultRunCommand(request: CommandRequest): Promise<CommandResult> {
@@ -2607,6 +2761,8 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
   let authorisationDate: string | undefined;
   let authorisationQuote: string | undefined;
   const allowNonDefaultBranchFor: string[] = [];
+  let skipStrictness: string | undefined;
+  let sawSkipStrictnessFlag = false;
   for (let index = 0; index < values.length; index += 1) {
     const argument = values[index];
     if (argument === "--version") version = values[++index] ?? "";
@@ -2627,9 +2783,19 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     // Repeatable and per-member on purpose: see `ReleaseOptions.allowNonDefaultBranchFor`.
     else if (argument === "--allow-branch") allowNonDefaultBranchFor.push(values[++index] ?? "");
     else if (argument.startsWith("--allow-branch=")) allowNonDefaultBranchFor.push(argument.slice("--allow-branch=".length));
-    else throw new Error(`Unknown release-family argument: ${argument}.`);
+    else if (argument === "--skip-strictness") {
+      sawSkipStrictnessFlag = true;
+      skipStrictness = values[++index] ?? "";
+    } else if (argument.startsWith("--skip-strictness=")) {
+      sawSkipStrictnessFlag = true;
+      skipStrictness = argument.slice("--skip-strictness=".length);
+    } else throw new Error(`Unknown release-family argument: ${argument}.`);
   }
   assertExactVersion(version);
+  // Validated HERE, at parse time, so a CLI invocation with a blank/absent
+  // reason fails fast -- `runReleaseFamily` validates again for a caller
+  // that builds `ReleaseOptions` directly instead of through this parser.
+  if (sawSkipStrictnessFlag) skipStrictness = assertSkipStrictnessReasonIsStated(skipStrictness);
 
   // Assembled only when SOMETHING was given: a half-filled authorisation is
   // reported by `assertMatrixScopeIsStated` naming the missing piece, rather
@@ -2652,6 +2818,7 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     only,
     matrixAuthorisation,
     allowNonDefaultBranchFor: allowNonDefaultBranchFor.length > 0 ? allowNonDefaultBranchFor : undefined,
+    skipStrictness,
   };
 }
 

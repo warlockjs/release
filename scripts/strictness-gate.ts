@@ -142,12 +142,54 @@ function selectedPackages(packages: WorkspacePackage[], args: string[]): Workspa
   return [pkg];
 }
 
+/** One package's measured standing against its recorded allowance. */
+export type StrictnessPackageResult = {
+  dir: string;
+  /** True when the package's own compile produced no proof it was covered -- reported as UNMEASURED, never a silent pass. */
+  unmeasured: boolean;
+  count: number;
+  allowance: number;
+  /** `Math.max(0, count - allowance)`; zero for both an in-budget package and an unmeasured one. */
+  over: number;
+};
+
+/** The structured, callable form of this gate's measurement -- what `main()` prints, and what a caller wires in as a dependency instead of re-invoking this file as a subprocess. */
+export type StrictnessGateRunResult = {
+  passed: boolean;
+  text: string;
+  packages: readonly StrictnessPackageResult[];
+};
+
+/**
+ * Callable runner: measures the given packages (every discovered package by
+ * default) against their recorded strictness allowance and returns a
+ * structured result instead of printing and exiting.
+ *
+ * This is the seam `release-family.ts` `gate` mode injects: it lets the
+ * family gate run the same ratchet this file's CLI runs, in-process, with a
+ * fake substituted in tests -- rather than shelling back out to this file as
+ * a subprocess.
+ */
+export function runStrictnessGate(packages: WorkspacePackage[] = discoverPackages()): StrictnessGateRunResult {
+  const allowances = readAllowances();
+  const measurement = collectOwnedDiagnostics(packages);
+  const report = formatReport(packages, allowances, measurement);
+  const results: StrictnessPackageResult[] = packages.map((pkg) => {
+    const unmeasured = !measurement.covered.has(pkg.dir);
+    const count = measurement.diagnostics.get(pkg.dir)?.length ?? 0;
+    const allowance = unmeasured ? 0 : (allowances[pkg.dir] ?? 0);
+    const over = unmeasured ? 0 : Math.max(0, count - allowance);
+    return { dir: pkg.dir, unmeasured, count, allowance, over };
+  });
+  return { passed: !report.failed, text: report.text, packages: results };
+}
+
 async function main(): Promise<number> {
   const allPackages = discoverPackages();
   const packages = selectedPackages(allPackages, process.argv.slice(2));
-  const report = formatReport(packages, readAllowances(), collectOwnedDiagnostics(packages));
-  console.log(report.text);
-  return report.failed ? 1 : 0;
+  const result = runStrictnessGate(packages);
+  console.log(result.text);
+  return result.passed ? 0 : 1;
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) main().then((code) => process.exit(code)).catch((error: unknown) => { console.error(error instanceof Error ? error.message : error); process.exit(1); });

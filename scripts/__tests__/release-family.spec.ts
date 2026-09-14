@@ -171,6 +171,15 @@ function fixture(
     writeHandoff: async (_filePath, handoff) => {
       handoffs.push(handoff);
     },
+    // Default innocent case for every pre-existing gate-mode test in this
+    // file: the strictness ratchet passes cleanly without ever compiling the
+    // real workspace. Tests exercising the ratchet itself live in
+    // `strictness-family-wiring.spec.ts` and override this explicitly.
+    runStrictnessGate: async () => ({
+      passed: true,
+      text: "strictness-gate: owned diagnostics / allowance\n  (fixture) 0 / 0 OK",
+      packages: [],
+    }),
     ...overrides,
   };
   return { dependencies, commands, handoffs, gateInputs };
