@@ -14,6 +14,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { consumerStrictnessFlags } from "./consumer-strictness-flags";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -56,6 +57,28 @@ export function sharedStrictnessArgs(filePath = STRICTNESS_CONTRACT_PATH): strin
   });
 }
 
+/**
+ * Forced compile args = the shared strictness contract, unioned with the
+ * consumer app's own checking flags (so no package can pass this gate while
+ * being stricter in isolation than it will be compiled by a real consumer
+ * app), deduped and in stable order. This is the single source of forced
+ * flags for `collectOwnedDiagnostics`.
+ */
+export function buildForcedStrictnessArgs(): string[] {
+  const seen = new Set<string>();
+  const args: string[] = [];
+  const flagPairs = [...sharedStrictnessArgs().reduce<[string, string][]>((pairs, value, index, all) => {
+    if (index % 2 === 0) pairs.push([value, all[index + 1]]);
+    return pairs;
+  }, []), ...consumerStrictnessFlags().map((flag): [string, string] => [`--${flag}`, "true"])];
+  for (const [flag, value] of flagPairs) {
+    if (seen.has(flag)) continue;
+    seen.add(flag);
+    args.push(flag, value);
+  }
+  return args;
+}
+
 function normalizeFile(filePath: string, base = REPO_ROOT): string {
   return path.resolve(base, filePath.replace(/\\/g, "/")).replace(/\\/g, "/");
 }
@@ -77,7 +100,7 @@ export function collectOwnedDiagnostics(packages: WorkspacePackage[]): Measureme
   const diagnostics = new Map(packages.map((pkg) => [pkg.dir, new Map<string, OwnedDiagnostic>()]));
   const covered = new Set<string>();
   const compiles = packages.map((pkg) => ({ path: pkg.path, coverage: pkg }));
-  const strictnessArgs = sharedStrictnessArgs();
+  const strictnessArgs = buildForcedStrictnessArgs();
   for (const compile of compiles) {
     const result = spawnSync(process.execPath, [TSC_PATH, "-p", "tsconfig.json", "--noEmit", "--pretty", "false", "--listFiles", ...strictnessArgs], { cwd: compile.path, encoding: "utf8" });
     if (result.error) throw result.error;

@@ -6,6 +6,15 @@
   // The resulting rise for formerly lenient packages is truth arriving, not a
   // regression. From this re-seeded baseline, these numbers may only go DOWN.
   // `builder` has no TypeScript config, so it is unmeasured, not zero.
+  //
+  // 2026-09-14: consumer-contract flags (isolatedModules,
+  // noFallthroughCasesInSwitch) added — every package is now compiled at
+  // least as strictly as the scaffolded consumer app's tsconfig.json, not
+  // just the shared strict/noUncheckedIndexedAccess/forceConsistentCasingInFileNames
+  // contract. Re-measured with:
+  // `node --import tsx builder/scripts/strictness-gate.ts`
+  // `core` fell 119 -> 47 and `web` rose 186 -> 187; every other package's
+  // count was unchanged. Ratchet applied both directions per policy.
   "access": 0,
   "ai": 463,
   "ai-anthropic": 47,
@@ -25,7 +34,7 @@
   "cache": 16,
   "cascade": 0,
   "context": 0,
-  "core": 119,
+  "core": 47,
   "create-warlock": 9,
   "docs": 18,
   "fs": 1,
@@ -34,5 +43,5 @@
   "notifications": 0,
   "scheduler": 23,
   "seal": 0,
-  "web": 186
+  "web": 187
 }
