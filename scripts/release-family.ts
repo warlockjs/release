@@ -15,6 +15,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { gunzipSync } from "node:zlib";
 import { assertArtifactContainsItsEntryPoints } from "./artifact-entry-points.mjs";
+import { assertTarballContainsItsEntryPoints } from "./tarball-entry-points.mjs";
 
 import type { FamilyPackage } from "@mongez/pkgist";
 import pkgistConfig from "../pkgist.config.ts";
@@ -2403,7 +2404,7 @@ async function defaultSha256File(filePath: string): Promise<string> {
   return hash.digest("hex");
 }
 
-async function inspectArtifact(tarballPath: string): Promise<ArtifactInspection> {
+export async function inspectArtifact(tarballPath: string): Promise<ArtifactInspection> {
   const archive = gunzipSync(await readFile(tarballPath));
   const entries: string[] = [];
   let manifest: BuiltManifest | undefined;
@@ -2429,6 +2430,15 @@ async function inspectArtifact(tarballPath: string): Promise<ArtifactInspection>
     offset = bodyStart + Math.ceil(size / 512) * 512;
   }
   if (!manifest) throw new Error(`Packed artifact has no package/package.json: ${tarballPath}.`);
+
+  // Hollow-tarball guard: the pre-pack BUILD DIRECTORY may contain every file
+  // the manifest promises, but a `files` allowlist or `.npmignore` rule can
+  // still exclude those same files from what `npm pack` actually wrote into
+  // this tarball. Checked here, inside inspectArtifact itself, so EVERY gate
+  // run applies it to EVERY packed tarball -- before its sha256 is taken and
+  // before it reaches the publish handoff.
+  assertTarballContainsItsEntryPoints(String(manifest.name ?? tarballPath), manifest, new Set(entries));
+
   return { manifest, entries };
 }
 
