@@ -729,6 +729,8 @@ describe("per-member release commit (card D1a)", () => {
     outcomes: {
       gitStatus?: ReadonlyMap<string, string>;
       commit?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
+      /** What `git diff --cached --name-only` reports staged. Defaults to every path passed -- a real rewrite. */
+      staged?: (request: CommandRequest) => string;
     } = {},
   ): ReturnType<typeof fixture> {
     const control = fixture({
@@ -758,6 +760,14 @@ describe("per-member release commit (card D1a)", () => {
       if (request.command === "git" && request.args[0] === "status") {
         control.commands.push(request);
         const stdout = outcomes.gitStatus?.get(request.cwd) ?? "";
+        return { stdout, stderr: "" };
+      }
+      if (request.command === "git" && request.args[0] === "diff" && request.args.includes("--cached")) {
+        control.commands.push(request);
+        const separator = request.args.indexOf("--");
+        const paths = separator === -1 ? [] : request.args.slice(separator + 1);
+        const stdout = outcomes.staged?.(request) ?? paths.map(entry => `${entry}
+`).join("");
         return { stdout, stderr: "" };
       }
       return await baseRunCommand(request);
@@ -912,6 +922,30 @@ describe("per-member release commit (card D1a)", () => {
     const cleanControl = commitFixture();
     const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
     assert.ok(handoff);
+  });
+
+  it("a manifest already committed at the release version (nothing staged) is NOT refused: no commit is attempted, and HEAD is the release commit", async () => {
+    // The gate reconciles the version from SOURCE, so a real run always
+    // starts from manifests already committed at VERSION and pkgist's
+    // rewrite stages nothing. Treating that as a failed commit refused
+    // every member of the 5.7.0 run.
+    let capturedProvenance: unknown;
+    const control = commitFixture({ staged: () => "" });
+    control.dependencies.writeTextFile = async (filePath, contents) => {
+      if (path.basename(filePath) === "build-provenance.json") capturedProvenance = JSON.parse(contents);
+    };
+
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff, "a no-op release edit must not refuse the release");
+
+    const commits = control.commands.filter(command => command.command === "git" && command.args[0] === "commit");
+    assert.equal(commits.length, 0, "nothing staged means nothing to commit -- a commit must not even be attempted");
+
+    const provenance = capturedProvenance as { members: Array<{ name: string; releaseCommitSha: string }> };
+    assert.ok(provenance, "provenance must be written");
+    for (const entry of provenance.members) {
+      assert.match(entry.releaseCommitSha, /^[0-9a-f]{40}$/, `${entry.name} must record HEAD as its release commit`);
+    }
   });
 });
 
