@@ -94,6 +94,26 @@ function extractDiagnostic(line: string): { file: string; line: number; code: nu
   return { file: match[1], line: Number(match[2]), code: Number(match[4]) };
 }
 
+/**
+ * Program-containment diagnostic codes: TS6059 ("file is not under rootDir")
+ * and TS6307 ("file is not listed within the file list of project") are a
+ * property of the *program* that raised them, not of the file they point at.
+ * A package can legally relative-import a file that lives outside its own
+ * rootDir; when that happens, the compiling package's own program is the one
+ * that reports the violation, at the location of the imported file. Charging
+ * that diagnostic to the imported file's directory (file-based ownerOf)
+ * blames the wrong package. These two codes are therefore always owned by
+ * the package whose compile produced them; every other diagnostic code keeps
+ * the existing file-directory ownership below, unchanged.
+ *
+ * If two different packages' programs both produce the same containment
+ * diagnostic (same file/line/code) -- e.g. two packages each relative-import
+ * the same out-of-rootDir file -- it is counted once per producing program,
+ * because `diagnostics` buckets by the producing package's own `dir`, not by
+ * a single deduped key shared across programs.
+ */
+const PROGRAM_CONTAINMENT_CODES = new Set([6059, 6307]);
+
 /** Runs each package's own config with the shared strictness contract, proving coverage with TypeScript's file list. */
 export function collectOwnedDiagnostics(packages: WorkspacePackage[]): Measurement {
   if (!existsSync(TSC_PATH)) throw new Error(`Pinned TypeScript binary is missing: ${TSC_PATH}`);
@@ -110,7 +130,7 @@ export function collectOwnedDiagnostics(packages: WorkspacePackage[]): Measureme
       if (compile.coverage && ownerOf(candidate, [compile.coverage], compile.path)) covered.add(compile.coverage.dir);
       const parsed = extractDiagnostic(candidate);
       if (!parsed) continue;
-      const owner = ownerOf(parsed.file, packages, compile.path);
+      const owner = PROGRAM_CONTAINMENT_CODES.has(parsed.code) ? compile.coverage : ownerOf(parsed.file, packages, compile.path);
       if (!owner) continue;
       const diagnostic: OwnedDiagnostic = { file: path.relative(REPO_ROOT, normalizeFile(parsed.file, compile.path)).replace(/\\/g, "/"), line: parsed.line, code: parsed.code };
       diagnostics.get(owner.dir)?.set(`${diagnostic.file}:${diagnostic.line}:${diagnostic.code}`, diagnostic);
