@@ -43,6 +43,7 @@
   "herald": 6,
   "logger": 8,
   "notifications": 11,
+  "queue": 0,
   "scheduler": 6,
   "seal": 7,
   "web": 1

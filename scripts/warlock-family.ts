@@ -4,7 +4,7 @@ import path from "node:path";
 import pkgistConfig from "../pkgist.config.ts";
 
 export const WARLOCK_FAMILY_NAME = "warlock";
-export const WARLOCK_FAMILY_SIZE = 28;
+export const WARLOCK_FAMILY_SIZE = 29;
 
 const EXACT_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 

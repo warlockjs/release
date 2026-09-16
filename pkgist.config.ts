@@ -487,6 +487,24 @@ export default defineConfig({
             "llms-full.txt",
           ],
         },
+        {
+          /**
+           * Durable background jobs (BullMQ + Redis), new in 5.13. The
+           * `./notifications` subpath (`queue/package.json` exports) is its own
+           * entry so the root barrel never pulls `@warlock.js/notifications`.
+           */
+          name: "@warlock.js/queue",
+          root: "../queue",
+          entries: ["index.ts", "notifications/index.ts"],
+          clone: [
+            "README.md",
+            "LICENSE",
+            "CHANGELOG.md",
+            "skills",
+            "llms.txt",
+            "llms-full.txt",
+          ],
+        },
       ],
     },
   ],

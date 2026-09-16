@@ -105,7 +105,7 @@ describe("local registry unit sequencing controls (not the real-registry accepta
         { ...INPUT, expectedFamilyNames: WARLOCK_FAMILY_PACKAGE_NAMES.slice(1), artifacts: ARTIFACTS.slice(1) },
         control.dependencies,
       ),
-      /exactly the 28-package/,
+      /exactly the 29-package/,
     );
     assert.equal(control.count.workspaces, 0);
   });
@@ -266,7 +266,7 @@ describe("local registry unit sequencing controls (not the real-registry accepta
 
   it("re-hashes after generator/cleanup and rejects changed bytes before handoff", async () => {
     let hashes = 0;
-    const control = fixture({ sha256File: async () => (++hashes <= 28 ? HASH : CHANGED_HASH) });
+    const control = fixture({ sha256File: async () => (++hashes <= 29 ? HASH : CHANGED_HASH) });
     await assert.rejects(runLocalRegistryPreGate(INPUT, control.dependencies), /changed after local rehearsal/);
     assert.equal(control.handoffs.length, 0);
     assert.equal(control.count.exited, 1);

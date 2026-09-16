@@ -35,6 +35,7 @@ const FAMILY_NAMES = [
   "@warlock.js/herald",
   "@warlock.js/logger",
   "@warlock.js/notifications",
+  "@warlock.js/queue",
   "@warlock.js/scheduler",
   "@warlock.js/seal",
   "@warlock.js/web",
@@ -52,7 +53,7 @@ afterEach(async () => {
 test("loads the authoritative family and keeps Web/Core late and create-warlock last", async () => {
   const family = await loadAuthoritativeWarlockFamily();
 
-  assert.equal(family.members.length, 28);
+  assert.equal(family.members.length, 29);
   assert.deepEqual(
     family.members.slice(-3).map(member => member.name),
     ["@warlock.js/web", "@warlock.js/core", "create-warlock"],
@@ -100,10 +101,10 @@ test("reports source version skew", async () => {
   await assert.rejects(deriveWarlockFamily(fixture), /lockstep version mismatch/);
 });
 
-test("uses 28 only as a secondary invariant after matching semantic sources", async () => {
+test("uses 29 only as a secondary invariant after matching semantic sources", async () => {
   const fixture = await createFixture(FAMILY_NAMES.slice(0, -1));
 
-  await assert.rejects(deriveWarlockFamily(fixture), /size invariant.*expected 28, found 27/);
+  await assert.rejects(deriveWarlockFamily(fixture), /size invariant.*expected 29, found 28/);
 });
 
 async function createFixture(

@@ -41,6 +41,7 @@
   "herald": 0,
   "logger": 0,
   "notifications": 0,
+  "queue": 0,
   "scheduler": 23,
   "seal": 0,
   "web": 178

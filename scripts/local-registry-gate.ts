@@ -47,6 +47,7 @@ export const WARLOCK_FAMILY_PACKAGE_NAMES = Object.freeze([
   "@warlock.js/notifications",
   "@warlock.js/web",
   "@warlock.js/access",
+  "@warlock.js/queue",
 ] as const);
 
 export interface CandidateArtifact {
@@ -209,7 +210,7 @@ function assertCandidate(input: LocalRegistryGateInput): void {
     )
   ) {
     throw new Error(
-      "expectedFamilyNames must contain exactly the 28-package Warlock family",
+      "expectedFamilyNames must contain exactly the 29-package Warlock family",
     );
   }
 
