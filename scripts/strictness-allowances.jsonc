@@ -34,7 +34,7 @@
   "cache": 16,
   "cascade": 0,
   "context": 0,
-  "core": 47,
+  "core": 46,
   "create-warlock": 9,
   "docs": 18,
   "fs": 1,
@@ -43,5 +43,5 @@
   "notifications": 0,
   "scheduler": 23,
   "seal": 0,
-  "web": 187
+  "web": 178
 }
