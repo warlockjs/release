@@ -437,16 +437,20 @@ export default defineConfig({
             "index.ts",
             "entry/index.ts",
             "server/index.ts",
-            // The PUBLIC server-only subpath `@warlock.js/web/server`
-            // (`web/package.json`'s `"./server"`) — deliberately a SEPARATE
-            // entry from `server/index.ts` above (the internal pipeline seam,
-            // reached only by the dev connector's `ssrLoadModule` on a runtime
-            // path string, never by a package specifier). Re-exporting the
-            // page-cache API from `server/index.ts` instead would make the
-            // whole pipeline surface (`executePageRequest`, `installPageRoutes`,
-            // …) publicly importable, which is exactly what that file's own
-            // header forbids.
-            "server/page-cache.ts",
+            // The PUBLIC server-only subpath `@warlock.js/web/page-cache`
+            // (`web/package.json`'s `"./page-cache"`) — deliberately a
+            // SEPARATE entry from `server/index.ts` above (the internal
+            // pipeline seam, reached only by the dev connector's
+            // `ssrLoadModule` on a runtime path string, never by a package
+            // specifier). Re-exporting the page-cache API from
+            // `server/index.ts` instead would make the whole pipeline
+            // surface (`executePageRequest`, `installPageRoutes`, …)
+            // publicly importable, which is exactly what that file's own
+            // header forbids. Top-level (`page-cache.ts`, not
+            // `server/page-cache.ts`) so pkgist derives "./page-cache"
+            // instead of colliding with the "./server" key `server/index.ts`
+            // already owns.
+            "page-cache.ts",
             "client/runtime/index.ts",
             "connector/index.ts",
             "vite/index.ts",
