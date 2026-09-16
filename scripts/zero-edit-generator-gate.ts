@@ -466,8 +466,14 @@ async function runRequired(runtime: Runtime, request: GateCommandRequest, label:
   return result;
 }
 
+/**
+ * The environment for every child run against a generated app. NODE_ENV is set,
+ * never inherited: npm reads NODE_ENV=production as omit=dev, so a release shell
+ * exporting it silently drops the scaffold's devDependencies (vitest) and the
+ * generated app then fails its typecheck.
+ */
 function gateEnvironment(context: GeneratorGateContext): NodeJS.ProcessEnv {
-  return { ...context.npmEnvironment, CI: "1", NO_COLOR: "1" };
+  return { ...context.npmEnvironment, CI: "1", NO_COLOR: "1", NODE_ENV: "development" };
 }
 
 export function assertExactCandidatePins(manifest: Record<string, unknown>, version: string): void {

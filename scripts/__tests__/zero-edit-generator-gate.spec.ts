@@ -403,6 +403,22 @@ describe("zero-edit generator matrix", () => {
     );
     assert.equal(await readFile(mutatedFile, "utf8"), "BROKEN_GENERATOR\n");
   });
+
+  it("installs generated apps with NODE_ENV=development even when the launching shell exports production", async () => {
+    // npm treats NODE_ENV=production as omit=dev, so an inherited value would
+    // silently drop the scaffold's devDependencies (vitest) and fail the typecheck.
+    const fixture = await harness(["alpha"]);
+    fixture.context.npmEnvironment.NODE_ENV = "production";
+    await runZeroEditGeneratorGate(fixture.context, fixture.dependencies);
+
+    const appCommands = fixture.commands.filter(
+      (command) => command.args[0] === NPM_CLI && !command.cwd.endsWith(`${path.sep}tool`),
+    );
+    assert.ok(appCommands.some((command) => command.args[1] === "install"));
+    for (const command of appCommands) {
+      assert.equal(command.env?.NODE_ENV, "development", `npm ${command.args[1]} in ${command.cwd}`);
+    }
+  });
 });
 
 function arg(request: GateCommandRequest, flag: string): string {
