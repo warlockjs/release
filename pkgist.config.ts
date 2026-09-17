@@ -505,6 +505,19 @@ export default defineConfig({
             "llms-full.txt",
           ],
         },
+        {
+          /** Runtime `sitemap.xml` generation, new in 5.15. No subpath exports. */
+          name: "@warlock.js/sitemap",
+          root: "../sitemap",
+          clone: [
+            "README.md",
+            "LICENSE",
+            "CHANGELOG.md",
+            "skills",
+            "llms.txt",
+            "llms-full.txt",
+          ],
+        },
       ],
     },
   ],
