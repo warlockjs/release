@@ -44,5 +44,9 @@
   "queue": 0,
   "scheduler": 23,
   "seal": 0,
+  // 2026-09-18: new package in 5.15.0. Seeded at 0 deliberately — a package
+  // written today has no reason to start with an allowance, and the ratchet
+  // only moves down.
+  "sitemap": 0,
   "web": 178
 }
