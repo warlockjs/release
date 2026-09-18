@@ -495,7 +495,7 @@ export default defineConfig({
            */
           name: "@warlock.js/queue",
           root: "../queue",
-          entries: ["index.ts", "notifications/index.ts"],
+          entries: ["index.ts"],
           clone: [
             "README.md",
             "LICENSE",
