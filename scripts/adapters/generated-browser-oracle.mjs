@@ -695,7 +695,14 @@ async function driveBrowserPhase({ baseUrl, chromeExecutable, homePage, includeH
       },
       sessionId,
     );
-    cdp.on("Runtime.exceptionThrown", event => pageErrors.push(event.exceptionDetails?.text ?? "browser exception"), sessionId);
+    cdp.on(
+      "Runtime.exceptionThrown",
+      event =>
+        pageErrors.push(
+          event.exceptionDetails?.exception?.description ?? event.exceptionDetails?.text ?? "browser exception",
+        ),
+      sessionId,
+    );
     cdp.on(
       "Network.requestWillBeSent",
       event => {
@@ -712,12 +719,27 @@ async function driveBrowserPhase({ baseUrl, chromeExecutable, homePage, includeH
 
     await cdp.send("Page.navigate", { url: baseUrl }, sessionId);
     await waitForExpression(cdp, sessionId, `document.readyState === "complete"`, 30_000);
-    await waitForExpression(
-      cdp,
-      sessionId,
-      `Object.keys(document.querySelector("#root") ?? {}).some(key => key.startsWith("__reactContainer$"))`,
-      30_000,
-    );
+    try {
+      await waitForExpression(
+        cdp,
+        sessionId,
+        `Object.keys(document.querySelector("#vessel") ?? {}).some(key => key.startsWith("__reactContainer$"))`,
+        30_000,
+      );
+    } catch (error) {
+      // Captured evidence first, diagnosis last: the gate keeps only stderr's tail.
+      const { result } = await cdp.send(
+        "Runtime.evaluate",
+        {
+          expression: `JSON.stringify({ ids: [...document.querySelectorAll("[id]")].map(e => e.id).slice(0, 20), scripts: [...document.scripts].map(s => s.src || "inline").slice(0, 10) })`,
+          returnByValue: true,
+        },
+        sessionId,
+      );
+      throw new Error(
+        `consoleErrors=${JSON.stringify(consoleErrors)}\npageErrors=${JSON.stringify(pageErrors)}\ndom=${result?.value}\n${String(error)}`,
+      );
+    }
 
     // --- click assertion ---------------------------------------------------
     // Read the SAME rendered number a user would read off the page — the
