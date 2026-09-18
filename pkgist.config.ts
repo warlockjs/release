@@ -451,6 +451,13 @@ export default defineConfig({
             // instead of colliding with the "./server" key `server/index.ts`
             // already owns.
             "page-cache.ts",
+            // The PUBLIC build-time subpath `@warlock.js/web/build`. Kept off
+            // the root barrel on purpose: it reaches `discover-pages`, which
+            // walks the filesystem and imports page files by path, and on the
+            // root barrel that module joined the graph of every page importing
+            // `@warlock.js/web` — a generated app answered 500 on every route
+            // in dev until it moved here (5.15.0).
+            "build/index.ts",
             "client/runtime/index.ts",
             "connector/index.ts",
             "vite/index.ts",
