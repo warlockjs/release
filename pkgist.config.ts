@@ -458,6 +458,13 @@ export default defineConfig({
             // `@warlock.js/web` — a generated app answered 500 on every route
             // in dev until it moved here (5.15.0).
             "build/index.ts",
+            // The PUBLIC sitemap/robots subpath `@warlock.js/web/sitemap`
+            // (5.16). `warlock add sitemap` generates
+            // `import type { WebSitemapConfig } from "@warlock.js/web/sitemap"`
+            // into src/config/web.ts, so a missing entry here breaks every
+            // app that adds the feature. Kept off the root barrel for the
+            // same reason as `build/index.ts`: it reaches listRoutablePages.
+            "sitemap/index.ts",
             "client/runtime/index.ts",
             "connector/index.ts",
             "vite/index.ts",
