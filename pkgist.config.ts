@@ -367,6 +367,7 @@ export default defineConfig({
         {
           name: "@warlock.js/seal",
           root: "../seal",
+          entries: ["index.ts", "object.ts", "string.ts"],
           clone: [
             "README.md",
             "LICENSE",
