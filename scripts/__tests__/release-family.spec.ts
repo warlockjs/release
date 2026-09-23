@@ -10,6 +10,7 @@ import {
   assertSinglePhysicalCore,
   checkPackageTreeIsClean,
   confirmSubjectsAtOrigin,
+  formatCommandFailureOutput,
   parseArguments,
   parseGitPorcelain,
   qualityCheckEnvironment,
@@ -63,6 +64,18 @@ const FAMILY: WarlockFamily = {
     },
   ],
 };
+
+describe("command failure output", () => {
+  it("retains TypeScript diagnostics written to stdout when a wrapper also writes stderr", () => {
+    const output = formatCommandFailureOutput(
+      "src/form.ts(12,3): error TS2322: Type 'number' is not assignable to type 'string'.\n",
+      "typecheck failed: tsconfig.typecheck.json\n",
+    );
+
+    assert.match(output, /stderr:[\s\S]*typecheck failed/);
+    assert.match(output, /stdout:[\s\S]*TS2322/);
+  });
+});
 
 function fixture(
   overrides: Partial<ReleaseFamilyDependencies> = {},

@@ -2557,6 +2557,20 @@ async function defaultRunStrictnessGate(): Promise<StrictnessGateRunResult> {
   return runStrictnessGate();
 }
 
+const MAX_COMMAND_FAILURE_STREAM_CHARS = 32_000;
+
+export function formatCommandFailureOutput(stdout: string, stderr: string): string {
+  const bounded = (value: string) =>
+    value.length <= MAX_COMMAND_FAILURE_STREAM_CHARS
+      ? value
+      : `${value.slice(0, MAX_COMMAND_FAILURE_STREAM_CHARS)}\n[output truncated after ${MAX_COMMAND_FAILURE_STREAM_CHARS} characters]`;
+  const streams = [
+    stderr ? `stderr:\n${bounded(stderr)}` : "",
+    stdout ? `stdout:\n${bounded(stdout)}` : "",
+  ].filter(Boolean);
+  return streams.join("\n");
+}
+
 async function defaultRunCommand(request: CommandRequest): Promise<CommandResult> {
   return await new Promise((resolve, reject) => {
     const child = spawn(request.command, [...request.args], {
@@ -2572,7 +2586,7 @@ async function defaultRunCommand(request: CommandRequest): Promise<CommandResult
     child.once("error", reject);
     child.once("close", code => {
       if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${request.command} exited ${String(code)}: ${stderr || stdout}`));
+      else reject(new Error(`${request.command} exited ${String(code)}: ${formatCommandFailureOutput(stdout, stderr)}`));
     });
   });
 }
