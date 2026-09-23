@@ -438,6 +438,9 @@ export default defineConfig({
             "index.ts",
             "entry/index.ts",
             "server/index.ts",
+            // Optional browser form integration must remain independently
+            // importable without pulling its peers into the root entry.
+            "form/index.ts",
             // The PUBLIC server-only subpath `@warlock.js/web/page-cache`
             // (`web/package.json`'s `"./page-cache"`) — deliberately a
             // SEPARATE entry from `server/index.ts` above (the internal

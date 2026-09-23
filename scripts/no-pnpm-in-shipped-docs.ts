@@ -85,12 +85,12 @@ export const ALLOWLIST: ReadonlyArray<{ relPath: string; line: number; reason: s
   // lines too, not exempted as a whole file.
   { relPath: "core/skills/run-app/SKILL.md", line: 108, reason: "historical bugfix note scoped to pnpm's hoisting behavior; no npm equivalent because npm never had the bug" },
   { relPath: "core/skills/run-app/SKILL.md", line: 109, reason: "same note — mentions yarn/pnpm hoisting behavior as history, not an instruction" },
-  { relPath: "core/skills/run-app/SKILL.md", line: 259, reason: "pnpm 10+'s own install-script gating is pnpm-specific troubleshooting; npm has no equivalent gate to document" },
-  { relPath: "core/skills/run-app/SKILL.md", line: 274, reason: "same pnpm-specific troubleshooting section, explaining where pnpm reads the allowlist from" },
-  { relPath: "core/llms-full.txt", line: 3385, reason: "generated mirror of core/skills/run-app/SKILL.md:108 — see that entry" },
-  { relPath: "core/llms-full.txt", line: 3386, reason: "generated mirror of core/skills/run-app/SKILL.md:109 — see that entry" },
-  { relPath: "core/llms-full.txt", line: 3536, reason: "generated mirror of core/skills/run-app/SKILL.md:259 — see that entry" },
-  { relPath: "core/llms-full.txt", line: 3551, reason: "generated mirror of core/skills/run-app/SKILL.md:274 — see that entry" },
+  { relPath: "core/skills/run-app/SKILL.md", line: 261, reason: "pnpm 10+'s own install-script gating is pnpm-specific troubleshooting; npm has no equivalent gate to document" },
+  { relPath: "core/skills/run-app/SKILL.md", line: 276, reason: "same pnpm-specific troubleshooting section, explaining where pnpm reads the allowlist from" },
+  { relPath: "core/llms-full.txt", line: 3690, reason: "generated mirror of core/skills/run-app/SKILL.md:108 — see that entry" },
+  { relPath: "core/llms-full.txt", line: 3691, reason: "generated mirror of core/skills/run-app/SKILL.md:109 — see that entry" },
+  { relPath: "core/llms-full.txt", line: 3843, reason: "generated mirror of core/skills/run-app/SKILL.md:261 — see that entry" },
+  { relPath: "core/llms-full.txt", line: 3858, reason: "generated mirror of core/skills/run-app/SKILL.md:276 — see that entry" },
 
   // core/skills/update-packages/SKILL.md — a reference table documenting
   // `warlock update`'s REAL lockfile-detection behavior across every
@@ -100,9 +100,9 @@ export const ALLOWLIST: ReadonlyArray<{ relPath: string; line: number; reason: s
   { relPath: "core/skills/update-packages/SKILL.md", line: 46, reason: "reference table row describing warlock update's real yarn.lock handling, not an instruction to use yarn" },
   { relPath: "core/skills/update-packages/SKILL.md", line: 47, reason: "reference table row describing warlock update's real pnpm-lock.yaml handling, not an instruction to use pnpm" },
   { relPath: "core/skills/update-packages/SKILL.md", line: 50, reason: "prose explaining the same lockfile-detection precedence; mentions yarn as a noun, not a command to run" },
-  { relPath: "core/llms-full.txt", line: 5583, reason: "generated mirror of core/skills/update-packages/SKILL.md:46 — see that entry" },
-  { relPath: "core/llms-full.txt", line: 5584, reason: "generated mirror of core/skills/update-packages/SKILL.md:47 — see that entry" },
-  { relPath: "core/llms-full.txt", line: 5587, reason: "generated mirror of core/skills/update-packages/SKILL.md:50 — see that entry" },
+  { relPath: "core/llms-full.txt", line: 5924, reason: "generated mirror of core/skills/update-packages/SKILL.md:46 — see that entry" },
+  { relPath: "core/llms-full.txt", line: 5925, reason: "generated mirror of core/skills/update-packages/SKILL.md:47 — see that entry" },
+  { relPath: "core/llms-full.txt", line: 5928, reason: "generated mirror of core/skills/update-packages/SKILL.md:50 — see that entry" },
 
   // create-warlock/skills/create-a-warlock-project/SKILL.md — describes the
   // wizard's REAL interactive step 2, which genuinely offers yarn/pnpm as

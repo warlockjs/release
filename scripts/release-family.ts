@@ -1328,46 +1328,71 @@ export async function regenerateMemberLockfile(
     return { regenerated: false, passed: true, refusalMessage: "" };
   }
 
-  try {
-    await runtime.runCommand({
-      command: process.execPath,
-      args: [runtime.resolvePnpmCli(), "install", "--lockfile-only"],
-      cwd: member.root,
-      env: { ...process.env },
-    });
-  } catch (error) {
-    return {
-      regenerated: false,
-      passed: false,
-      refusalMessage: [
-        `Refusing to pack ${member.name}: its lockfile could not be regenerated after pkgist rewrote its manifest.`,
-        `Package root: ${member.root}`,
-        `pnpm install --lockfile-only: ${formatError(error)}`,
-      ].join("\n"),
-    };
-  }
+  // A member can live inside this workspace (notably create-warlock). Running
+  // pnpm there makes it discover and potentially rewrite the workspace root's
+  // dependency graph. Stage the two files in a standalone temporary directory
+  // instead, then copy back only a lockfile that the frozen install accepted.
+  const stagingRoot = await runtime.makeTemporaryDirectory("warlock-member-lockfile-");
+  const stagedManifestPath = path.join(stagingRoot, "package.json");
+  const stagedLockfilePath = path.join(stagingRoot, PNPM_LOCKFILE_NAME);
+  let lockfileRegenerated = false;
 
   try {
+    await runtime.writeTextFile(
+      stagedManifestPath,
+      await runtime.readTextFile(path.join(member.root, "package.json")),
+    );
+    await runtime.writeTextFile(stagedLockfilePath, await runtime.readTextFile(lockfilePath));
+
     await runtime.runCommand({
       command: process.execPath,
-      args: [runtime.resolvePnpmCli(), "install", "--frozen-lockfile"],
-      cwd: member.root,
+      args: [
+        runtime.resolvePnpmCli(),
+        "install",
+        "--lockfile-only",
+        "--ignore-workspace",
+        "--ignore-scripts",
+      ],
+      cwd: stagingRoot,
       env: { ...process.env },
     });
+    lockfileRegenerated = true;
+
+    await runtime.runCommand({
+      command: process.execPath,
+      args: [
+        runtime.resolvePnpmCli(),
+        "install",
+        "--frozen-lockfile",
+        "--ignore-workspace",
+        "--ignore-scripts",
+      ],
+      cwd: stagingRoot,
+      env: { ...process.env },
+    });
+
+    await runtime.writeTextFile(lockfilePath, await runtime.readTextFile(stagedLockfilePath));
+    return { regenerated: true, passed: true, refusalMessage: "" };
   } catch (error) {
     return {
-      regenerated: true,
+      regenerated: lockfileRegenerated,
       passed: false,
-      refusalMessage: [
-        `Refusing to pack ${member.name}: its regenerated lockfile does not agree with its rewritten manifest.`,
-        `Package root: ${member.root}`,
-        `pnpm install --frozen-lockfile: ${formatError(error)}`,
-        "Fix: this is the exact command that member's own CI runs -- if it refuses here, CI would refuse too.",
-      ].join("\n"),
+      refusalMessage: lockfileRegenerated
+        ? [
+            `Refusing to pack ${member.name}: its regenerated lockfile does not agree with its rewritten manifest.`,
+            `Package root: ${member.root}`,
+            `pnpm install --frozen-lockfile: ${formatError(error)}`,
+            "Fix: this is the exact command that member's own CI runs -- if it refuses here, CI would refuse too.",
+          ].join("\n")
+        : [
+            `Refusing to pack ${member.name}: its lockfile could not be regenerated after pkgist rewrote its manifest.`,
+            `Package root: ${member.root}`,
+            `pnpm install --lockfile-only: ${formatError(error)}`,
+          ].join("\n"),
     };
+  } finally {
+    await runtime.removeDirectory(stagingRoot);
   }
-
-  return { regenerated: true, passed: true, refusalMessage: "" };
 }
 
 export interface MemberCommitResult {

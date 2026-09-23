@@ -87,6 +87,9 @@ function fixture(
       if (path.basename(filePath) === "package.json") {
         return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
       }
+      if (path.basename(filePath) === "pnpm-lock.yaml") {
+        return "lockfileVersion: '9.0'\n";
+      }
       throw new Error(`fixture readTextFile has no stub for ${filePath}`);
     },
     resolvePkgistCli: () => path.resolve("pkgist", "dist", "cli.js"),
@@ -611,11 +614,21 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
       lockfileOnly?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
       frozenInstall?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
     } = {},
-  ): ReturnType<typeof fixture> {
+  ) {
+    const stagingRoot = path.join(path.parse(createWarlockRoot).root, "release-lockfile-stage");
+    const writes: Array<{ filePath: string; contents: string }> = [];
+    const removedDirectories: string[] = [];
     const control = fixture({
       // Only create-warlock carries a lockfile.
       fileExists: async filePath => path.basename(filePath) === "pnpm-lock.yaml"
         && path.dirname(filePath) === createWarlockRoot,
+      makeTemporaryDirectory: async () => stagingRoot,
+      removeDirectory: async directory => {
+        removedDirectories.push(directory);
+      },
+      writeTextFile: async (filePath, contents) => {
+        writes.push({ filePath, contents });
+      },
     });
     const baseRunCommand = control.dependencies.runCommand!;
     control.dependencies.runCommand = async request => {
@@ -630,12 +643,12 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
       }
       return await baseRunCommand(request);
     };
-    return control;
+    return { ...control, stagingRoot, writes, removedDirectories };
   }
 
-  function lockfileCommandsFor(control: ReturnType<typeof fixture>, root: string): CommandRequest[] {
+  function lockfileCommandsFor(control: ReturnType<typeof lockfileFixture>): CommandRequest[] {
     return control.commands.filter(
-      command => command.args[0] === PNPM_MARKER && command.cwd === root,
+      command => command.args[0] === PNPM_MARKER && command.cwd === control.stagingRoot,
     );
   }
 
@@ -660,10 +673,31 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
 
     assert.deepEqual(orderedKinds, ["build", "lockfile-only", "frozen-lockfile", "pack"]);
 
-    const pnpmCommands = lockfileCommandsFor(control, createWarlockRoot);
+    const pnpmCommands = lockfileCommandsFor(control);
     assert.equal(pnpmCommands.length, 2);
     assert.ok(pnpmCommands.every(command => command.command === process.execPath));
     assert.ok(pnpmCommands.every(command => command.args[0] === PNPM_MARKER));
+    assert.ok(pnpmCommands.every(command => command.cwd !== createWarlockRoot));
+    assert.ok(pnpmCommands.every(command => command.args.includes("--ignore-workspace")));
+    assert.ok(pnpmCommands.every(command => command.args.includes("--ignore-scripts")));
+    assert.ok(pnpmCommands.every(command => !command.cwd.startsWith(path.dirname(createWarlockRoot))));
+    assert.deepEqual(control.removedDirectories, [control.stagingRoot]);
+    assert.deepEqual(
+      control.writes.slice(0, 2),
+      [
+        {
+          filePath: path.join(control.stagingRoot, "package.json"),
+          contents: JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } }),
+        },
+        { filePath: path.join(control.stagingRoot, "pnpm-lock.yaml"), contents: "lockfileVersion: '9.0'\n" },
+      ],
+      "the member manifest and old lockfile must be copied into the isolated staging directory",
+    );
+    assert.deepEqual(
+      control.writes.filter(write => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml")),
+      [{ filePath: path.join(createWarlockRoot, "pnpm-lock.yaml"), contents: "lockfileVersion: '9.0'\n" }],
+      "only the validated staged lockfile may be copied into the member",
+    );
     // Never through npx/pnpm exec.
     assert.ok(control.commands.every(command => command.command !== "npx"));
     assert.ok(control.commands.every(command => !command.args.includes("exec")));
@@ -674,7 +708,10 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
     const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
     assert.ok(handoff);
 
-    assert.equal(lockfileCommandsFor(control, notificationsRoot).length, 0);
+    assert.equal(
+      control.commands.filter(command => command.args[0] === PNPM_MARKER && command.cwd === notificationsRoot).length,
+      0,
+    );
     const notifBuilds = control.commands.filter(
       command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
     );
@@ -710,6 +747,12 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
       command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
     );
     assert.equal(cwPacks.length, 0, "member whose lockfile disagrees must not be packed");
+    assert.deepEqual(
+      control.writes.filter(write => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml")),
+      [],
+      "a lockfile that fails frozen validation must never be copied back to the member",
+    );
+    assert.deepEqual(control.removedDirectories, [control.stagingRoot]);
 
     // The other, unaffected member still built and packed.
     const notifBuilds = control.commands.filter(
@@ -796,7 +839,7 @@ describe("per-member release commit (card D1a)", () => {
     const cwCommands = control.commands.filter(
       command =>
         (command.args[1] === "build" && command.args[2] === "create-warlock") ||
-        (command.args[0] === PNPM_MARKER && command.cwd === createWarlockRoot) ||
+        command.args[0] === PNPM_MARKER ||
         (command.command === "git" &&
           command.cwd === createWarlockRoot &&
           (command.args[0] === "add" || command.args[0] === "commit")) ||
@@ -820,6 +863,11 @@ describe("per-member release commit (card D1a)", () => {
       "commit",
       "pack",
     ]);
+
+    const lockfileCommands = control.commands.filter(command => command.args[0] === PNPM_MARKER);
+    assert.ok(lockfileCommands.every(command => command.cwd !== createWarlockRoot));
+    assert.ok(lockfileCommands.every(command => command.args.includes("--ignore-workspace")));
+    assert.ok(lockfileCommands.every(command => command.args.includes("--ignore-scripts")));
 
     // create-warlock regenerated a lockfile this run: both package.json and
     // its lockfile are staged and committed, nothing else.
