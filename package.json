@@ -19,7 +19,7 @@
     "test:resolver-smoke": "node --import tsx --test scripts/__tests__/default-resolver-smoke.spec.ts"
   },
   "dependencies": {
-    "@mongez/pkgist": "1.6.3",
+    "@mongez/pkgist": "1.6.4",
     "verdaccio": "6.10.1"
   },
   "devDependencies": {
