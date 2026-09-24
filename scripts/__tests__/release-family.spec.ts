@@ -626,6 +626,7 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
     outcomes: {
       lockfileOnly?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
       frozenInstall?: (request: CommandRequest) => { stdout: string; stderr: string } | Error;
+      hasWorkspacePolicy?: boolean;
     } = {},
   ) {
     const stagingRoot = path.join(path.parse(createWarlockRoot).root, "release-lockfile-stage");
@@ -633,8 +634,21 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
     const removedDirectories: string[] = [];
     const control = fixture({
       // Only create-warlock carries a lockfile.
-      fileExists: async filePath => path.basename(filePath) === "pnpm-lock.yaml"
-        && path.dirname(filePath) === createWarlockRoot,
+      fileExists: async filePath => (path.basename(filePath) === "pnpm-lock.yaml"
+        && path.dirname(filePath) === createWarlockRoot)
+        || (outcomes.hasWorkspacePolicy === true
+          && path.basename(filePath) === "pnpm-workspace.yaml"
+          && path.dirname(filePath) === createWarlockRoot),
+      readTextFile: async filePath => {
+        if (path.basename(filePath) === "pnpm-workspace.yaml") {
+          return "minimumReleaseAgeExclude:\n  - '@mongez/*'\n";
+        }
+        if (path.basename(filePath) === "package.json") {
+          return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
+        }
+        if (path.basename(filePath) === "pnpm-lock.yaml") return "lockfileVersion: '9.0'\n";
+        throw new Error(`fixture readTextFile has no stub for ${filePath}`);
+      },
       makeTemporaryDirectory: async () => stagingRoot,
       removeDirectory: async directory => {
         removedDirectories.push(directory);
@@ -666,7 +680,7 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
   }
 
   it("a member WITH a lockfile gets regenerated then frozen-lockfile-checked, after its build and before its pack", async () => {
-    const control = lockfileFixture();
+    const control = lockfileFixture({ hasWorkspacePolicy: true });
     const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
     assert.ok(handoff);
 
@@ -691,20 +705,27 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
     assert.ok(pnpmCommands.every(command => command.command === process.execPath));
     assert.ok(pnpmCommands.every(command => command.args[0] === PNPM_MARKER));
     assert.ok(pnpmCommands.every(command => command.cwd !== createWarlockRoot));
-    assert.ok(pnpmCommands.every(command => command.args.includes("--ignore-workspace")));
+    assert.ok(
+      pnpmCommands.every(command => !command.args.includes("--ignore-workspace")),
+      "the isolated member policy must remain active",
+    );
     assert.ok(pnpmCommands.every(command => command.args.includes("--ignore-scripts")));
     assert.ok(pnpmCommands.every(command => !command.cwd.startsWith(path.dirname(createWarlockRoot))));
     assert.deepEqual(control.removedDirectories, [control.stagingRoot]);
     assert.deepEqual(
-      control.writes.slice(0, 2),
+      control.writes.slice(0, 3),
       [
         {
           filePath: path.join(control.stagingRoot, "package.json"),
           contents: JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } }),
         },
         { filePath: path.join(control.stagingRoot, "pnpm-lock.yaml"), contents: "lockfileVersion: '9.0'\n" },
+        {
+          filePath: path.join(control.stagingRoot, "pnpm-workspace.yaml"),
+          contents: "minimumReleaseAgeExclude:\n  - '@mongez/*'\n",
+        },
       ],
-      "the member manifest and old lockfile must be copied into the isolated staging directory",
+      "the member manifest, old lockfile, and existing policy must be copied into the isolated staging directory",
     );
     assert.deepEqual(
       control.writes.filter(write => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml")),
@@ -714,6 +735,16 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
     // Never through npx/pnpm exec.
     assert.ok(control.commands.every(command => command.command !== "npx"));
     assert.ok(control.commands.every(command => !command.args.includes("exec")));
+  });
+
+  it("does not synthesize a pnpm workspace policy when the member has none", async () => {
+    const control = lockfileFixture();
+    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    assert.ok(handoff);
+    assert.equal(
+      control.writes.filter(write => write.filePath === path.join(control.stagingRoot, "pnpm-workspace.yaml")).length,
+      0,
+    );
   });
 
   it("a member WITHOUT a lockfile gets neither regeneration nor the frozen-lockfile check, and is otherwise untouched", async () => {
@@ -1467,7 +1498,7 @@ describe("--reuse-artifacts", () => {
       return await baseReadTextFile(filePath);
     };
 
-    control.dependencies.fileExists = async () => true;
+    control.dependencies.fileExists = async filePath => path.basename(filePath) !== "pnpm-workspace.yaml";
 
     const baseRunCommand = control.dependencies.runCommand!;
     control.dependencies.runCommand = async request => {

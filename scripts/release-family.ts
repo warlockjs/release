@@ -1330,11 +1330,13 @@ export async function regenerateMemberLockfile(
 
   // A member can live inside this workspace (notably create-warlock). Running
   // pnpm there makes it discover and potentially rewrite the workspace root's
-  // dependency graph. Stage the two files in a standalone temporary directory
+  // dependency graph. Stage the member files in a standalone temporary directory
   // instead, then copy back only a lockfile that the frozen install accepted.
   const stagingRoot = await runtime.makeTemporaryDirectory("warlock-member-lockfile-");
   const stagedManifestPath = path.join(stagingRoot, "package.json");
   const stagedLockfilePath = path.join(stagingRoot, PNPM_LOCKFILE_NAME);
+  const workspacePolicyPath = path.join(member.root, "pnpm-workspace.yaml");
+  const stagedWorkspacePolicyPath = path.join(stagingRoot, "pnpm-workspace.yaml");
   let lockfileRegenerated = false;
 
   try {
@@ -1344,13 +1346,23 @@ export async function regenerateMemberLockfile(
     );
     await runtime.writeTextFile(stagedLockfilePath, await runtime.readTextFile(lockfilePath));
 
+    // A standalone member can carry its own pnpm policy (for example its
+    // approved minimum-release-age exclusions). Preserve that existing policy
+    // inside the isolated staging root; never synthesize one for members that
+    // do not declare it.
+    if (await runtime.fileExists(workspacePolicyPath)) {
+      await runtime.writeTextFile(
+        stagedWorkspacePolicyPath,
+        await runtime.readTextFile(workspacePolicyPath),
+      );
+    }
+
     await runtime.runCommand({
       command: process.execPath,
       args: [
         runtime.resolvePnpmCli(),
         "install",
         "--lockfile-only",
-        "--ignore-workspace",
         "--ignore-scripts",
       ],
       cwd: stagingRoot,
@@ -1364,7 +1376,6 @@ export async function regenerateMemberLockfile(
         runtime.resolvePnpmCli(),
         "install",
         "--frozen-lockfile",
-        "--ignore-workspace",
         "--ignore-scripts",
       ],
       cwd: stagingRoot,
