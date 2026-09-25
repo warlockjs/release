@@ -64,6 +64,13 @@ describe("diffRoutes", () => {
     source: "",
   });
 
+  it("never counts a framework-synthetic (virtual \\0 source) route as introduced", () => {
+    const catchAll = { ...row("GET", "/*"), source: "\0warlock:framework-default-404" };
+    const app = [row("GET", "/"), catchAll, row("GET", "/welcome")];
+    const baseline = [row("GET", "/")];
+    assert.deepEqual(diffRoutes(app, baseline), [row("GET", "/welcome")]);
+  });
+
   it("returns app rows whose id is absent from the baseline", () => {
     const app = [row("GET", "/"), row("GET", "/health"), row("POST", "/users")];
     const baseline = [row("GET", "/"), row("GET", "/health")];

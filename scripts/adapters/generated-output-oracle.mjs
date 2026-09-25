@@ -145,13 +145,20 @@ export function routeId(method, routePath) {
  * middleware count or action label changed while staying registered was not
  * introduced by the feature under test.
  *
+ * Framework-synthetic rows (a virtual `source` starting with `\0`, e.g. the
+ * web connector's `\0warlock:framework-default-404` catch-all) are never
+ * "introduced": no generated file declares them, and a not-found catch-all
+ * answers 404 by contract, which the status probe would misread as unreachable.
+ *
  * @param appRows `RouteRow[]` from the generated app's `routes --json`.
  * @param baselineRows `RouteRow[]` from the baseline's `routes --json`.
  * @returns The app-only rows, in app order.
  */
 export function diffRoutes(appRows, baselineRows) {
   const baselineIds = new Set(baselineRows.map(row => routeId(row.method, row.path)));
-  return appRows.filter(row => !baselineIds.has(routeId(row.method, row.path)));
+  return appRows.filter(
+    row => !String(row.source ?? "").startsWith("\0") && !baselineIds.has(routeId(row.method, row.path)),
+  );
 }
 
 /**

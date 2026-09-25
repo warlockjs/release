@@ -455,6 +455,11 @@ export default defineConfig({
             // instead of colliding with the "./server" key `server/index.ts`
             // already owns.
             "page-cache.ts",
+
+            // The PUBLIC server-only subpath `@warlock.js/web/session` (5.21):
+            // requireUser/requireGuest reach @warlock.js/core, so they stay off
+            // the client-imported root barrel (Gate A).
+            "session.ts",
             // The PUBLIC build-time subpath `@warlock.js/web/build`. Kept off
             // the root barrel on purpose: it reaches `discover-pages`, which
             // walks the filesystem and imports page files by path, and on the
