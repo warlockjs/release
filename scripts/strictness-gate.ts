@@ -149,7 +149,14 @@ export function formatReport(packages: WorkspacePackage[], allowances: Record<st
     const count = measurement.diagnostics.get(pkg.dir)?.length ?? 0;
     const over = count - allowance;
     lines.push(`  ${pkg.dir}: ${count} / ${allowance}${over > 0 ? ` OVER by ${over}` : " OK"}`);
-    if (over > 0) failed = true;
+    if (over > 0) {
+      failed = true;
+      // A count alone cannot say WHICH diagnostic is new; list them so the
+      // run that refuses is also the run that explains itself.
+      for (const diagnostic of measurement.diagnostics.get(pkg.dir) ?? []) {
+        lines.push(`      ${diagnostic.file}:${diagnostic.line} TS${diagnostic.code}`);
+      }
+    }
   }
   return { text: lines.join("\n"), failed };
 }
