@@ -456,7 +456,7 @@ async function getJson(url, what) {
   const result = await httpRequest(url);
 
   if (result.status !== 200) {
-    throw new Error(`${what}: GET ${url} returned ${result.status}`);
+    throw new Error(`${what}: GET ${url} returned ${result.status}: ${JSON.stringify(result.body.slice(0, 300))}`);
   }
 
   return parseJsonBody(result, what);
@@ -528,6 +528,12 @@ async function withServer(context, label, args, body) {
 
   try {
     return await body(server);
+  } catch (error) {
+    // A failed check against a live server is only diagnosable with what the
+    // server said at the time.
+    throw new Error(`${errorMessage(error)}
+--- ${label} output (tail) ---
+${tail(server.rawOutput())}`);
   } finally {
     await stopProcess(server);
     log(`stopped ${label}`);
@@ -942,10 +948,23 @@ async function explainQuery(requestId, queryId) {
 
 async function inspectPostsRequest(server, details) {
   const summary = await waitForRecordedRequest(server, 30 * SECOND);
-  const request = await getJson(
-    `${BASE_URL}${DEVTOOLS_PATH}/api/requests/${encodeURIComponent(summary.id)}`,
-    "devtools request detail",
-  );
+  let request;
+
+  try {
+    request = await getJson(
+      `${BASE_URL}${DEVTOOLS_PATH}/api/requests/${encodeURIComponent(summary.id)}`,
+      "devtools request detail",
+    );
+  } catch (error) {
+    // Tells an evicted/replaced record apart from a request that never
+    // reached the detail route.
+    const listAgain = await getJson(`${BASE_URL}${DEVTOOLS_PATH}/api/requests`, "devtools request list").catch(
+      (listError) => errorMessage(listError),
+    );
+    const ids = Array.isArray(listAgain) ? listAgain.map((row) => `${row.id} ${row.method} ${row.path}`) : listAgain;
+    throw new Error(`${errorMessage(error)}
+list now: ${JSON.stringify(ids).slice(0, 1500)}`);
+  }
 
   const phases = [...new Set(request.phases.map((phase) => phase.name))];
   details.request = {
