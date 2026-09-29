@@ -130,17 +130,6 @@ jobs:
         working-directory: ws/docs
         run: node node_modules/astro/bin/astro.mjs sync
 
-      - name: "Diagnose: type packages fs compiles against"
-        continue-on-error: true
-        working-directory: ws/fs
-        run: |
-          tsc=../node_modules/.pnpm/typescript@5.9.3/node_modules/typescript/bin/tsc
-          node $tsc -p tsconfig.json --noEmit --listFiles > "$RUNNER_TEMP/fs-files.txt" 2>&1 || true
-          grep -E "error TS" "$RUNNER_TEMP/fs-files.txt" || true
-          grep -vE "/fs/(src|tests)/" "$RUNNER_TEMP/fs-files.txt" | grep -E "\.d\.ts$" | sed -E 's#.*/node_modules/##; s#^\.pnpm/[^/]+/node_modules/##' | awk -F/ '{print ($1 ~ /^@/ ? $1"/"$2 : $1)}' | sort | uniq -c | sort -rn
-          echo "--- declarations of ErrorConstructor outside typescript/lib:"
-          grep -E "\.d\.ts$" "$RUNNER_TEMP/fs-files.txt" | grep -v "/typescript/lib/" | xargs grep -ln "ErrorConstructor" || true
-
       - name: Gate (strictness, tests, typecheck, build, pack, local-registry install)
         working-directory: ws/builder
         run: |
