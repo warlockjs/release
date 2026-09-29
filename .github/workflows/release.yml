@@ -132,6 +132,12 @@ jobs:
 
       - name: Gate (strictness, tests, typecheck, build, pack, local-registry install)
         working-directory: ws/builder
+        # The branch check reads each member's default branch from GitHub, and
+        # 12 member repos are private.
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.RELEASE_GH_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
         run: |
           set -o pipefail
           node --import tsx scripts/release-family.ts gate --version "$WARLOCK_VERSION" --matrix none 2>&1 | tee "$LOGS/gate.log"
