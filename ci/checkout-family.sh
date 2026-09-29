@@ -33,6 +33,10 @@ clone() {
   local repo="$1" dir="$2"
   echo "clone warlockjs/$repo -> $dir"
   git clone --quiet --branch main "https://github.com/warlockjs/$repo.git" "$dir"
+  # The install marks bin files executable; the release's clean-tree check must
+  # not read that mode flip as an uncommitted change. (clone writes
+  # core.filemode=true into the repo's own config, so a global setting loses.)
+  git -C "$dir" config core.fileMode false
 }
 
 for name in $members; do
