@@ -1000,6 +1000,10 @@ list now: ${JSON.stringify(ids).slice(0, 1500)}`);
 async function checkDevtoolsInDev(context, details) {
   await withServer(context, "warlock-dev", ["dev"], async (server) => {
     await waitForHttpOk(server, `${BASE_URL}/health/live`, TIMEOUTS.devBoot);
+    // Liveness answers before the web connector has installed its pages; the
+    // ready block (core/src/dev-server/ready-block.ts) prints only once every
+    // connector has bound, so a page request before it can 404.
+    await waitForOutput(server, /➜\s+Web\s+http/, TIMEOUTS.devBoot, "dev ready block");
     log("dev server is up");
 
     const dashboard = await httpRequest(`${BASE_URL}${DEVTOOLS_PATH}`);
