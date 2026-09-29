@@ -1,0 +1,106 @@
+name: blog-check
+
+# Re-runs only the blog check against the tarballs a release run already built,
+# so iterating on the blog does not repeat the ~25 minute gate. It publishes
+# nothing; the release workflow still runs the blog check itself before any
+# publish.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version the tarballs carry
+        required: true
+        type: string
+      artifacts_run_id:
+        description: Run id of a release run whose gate passed (its tarballs are reused)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  blog:
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: warlock_blog_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      WARLOCK_VERSION: ${{ inputs.version }}
+      BLOG_DIR: ${{ github.workspace }}/blog
+      LOGS: ${{ github.workspace }}/logs
+      CI: "1"
+      NO_COLOR: "1"
+    steps:
+      - name: Validate inputs
+        env:
+          RUN_ID: ${{ inputs.artifacts_run_id }}
+        run: |
+          [[ "$WARLOCK_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::bad version"; exit 1; }
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo "::error::bad run id"; exit 1; }
+          mkdir -p "$LOGS"
+
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pnpm
+        run: npm install --global pnpm@11.24.0
+
+      - name: Download the release run's tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: warlock-${{ inputs.version }}-artifacts
+          run-id: ${{ inputs.artifacts_run_id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Clone the blog
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.RELEASE_GH_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        run: git clone --quiet --branch main https://github.com/warlockjs/blog-test.git "$BLOG_DIR"
+
+      - name: Install the browser
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+          npm init -y > /dev/null
+          npm install --no-audit --no-fund @playwright/test@1.62.1
+          node node_modules/@playwright/test/cli.js install --with-deps chromium
+
+      - name: Blog on the release tarballs
+        env:
+          MODE: tarballs
+          TARBALL_DIR: ${{ github.workspace }}/artifacts/release-artifacts/${{ inputs.version }}
+          PLAYWRIGHT_MODULE: ${{ runner.temp }}/pw/node_modules/@playwright/test/index.mjs
+          EVIDENCE_PATH: ${{ github.workspace }}/logs/blog-tarballs.json
+        run: |
+          set -o pipefail
+          node tooling/ci/blog-check.mjs 2>&1 | tee "$LOGS/blog-tarballs.log"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blog-check-${{ inputs.version }}-logs
+          path: logs
+          if-no-files-found: ignore
+          retention-days: 14
