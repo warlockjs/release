@@ -94,6 +94,8 @@ jobs:
           git config --global user.name "warlock-release"
           git config --global user.email "release@warlock.js.org"
           git config --global core.autocrlf false
+          # The install marks bin files executable on Linux; a mode flip is not a content change.
+          git config --global core.fileMode false
           git config --global init.defaultBranch main
 
       - name: Clone the family, docs and the blog
