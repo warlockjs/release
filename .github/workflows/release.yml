@@ -1,0 +1,203 @@
+name: release
+
+# Builds, gates and (optionally) publishes the whole @warlock.js family at one
+# version. Owner ruling 2026-09-29 (canon 32884462): releases run here, not on
+# a developer machine.
+#
+# One job on purpose: the handoff records ABSOLUTE tarball paths and the gate's
+# local release commits, so gate, publish and confirm must share one filesystem.
+#
+#   publish=false  full check (strictness, every member's tests + typecheck,
+#                  build, local-registry install, blog on the tarballs); stops
+#                  before npm.
+#   publish=true   the same, then npm publish, confirm at npm origin (install,
+#                  import, create-warlock), tag + push v<version> in every
+#                  member repo, and the blog again from the registry.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact version to release (every member's package.json must already say it)
+        required: true
+        type: string
+      publish:
+        description: Publish to npm after the checks pass
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: warlock-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    timeout-minutes: 350
+    services:
+      # queue + notifications test suites need a real Redis on 6390; there is no skip path.
+      redis:
+        image: redis:7
+        ports:
+          - 6390:6379
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+      # blog check only.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: warlock_blog_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      WARLOCK_VERSION: ${{ inputs.version }}
+      WS: ${{ github.workspace }}/ws
+      BLOG_DIR: ${{ github.workspace }}/blog
+      LOGS: ${{ github.workspace }}/logs
+      QUEUE_REDIS_HOST: 127.0.0.1
+      QUEUE_REDIS_PORT: "6390"
+      CI: "1"
+      NO_COLOR: "1"
+    steps:
+      - name: Validate version
+        run: |
+          if ! [[ "$WARLOCK_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be exact semver, got '$WARLOCK_VERSION'"; exit 1
+          fi
+          mkdir -p "$LOGS"
+
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          path: ws/builder
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pnpm beside node
+        # A global npm install lands in <node prefix>/lib/node_modules, which is
+        # where release-family.ts looks for pnpm's CLI on Linux.
+        run: npm install --global pnpm@11.24.0 && pnpm --version
+
+      - name: Git identity
+        run: |
+          git config --global user.name "warlock-release"
+          git config --global user.email "release@warlock.js.org"
+          git config --global core.autocrlf false
+          git config --global init.defaultBranch main
+
+      - name: Clone the family, docs and the blog
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_GH_TOKEN }}
+        run: |
+          bash ws/builder/ci/checkout-family.sh
+          cat "$RUNNER_TEMP/checked-out.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Assemble the workspace root
+        run: cp -a ws/builder/ci/workspace/. ws/
+
+      - name: Check every member is at the release version
+        working-directory: ws
+        run: |
+          bad=0
+          for d in $(grep -oE 'root: "\.\./[a-z0-9-]+"' builder/pkgist.config.ts | sed -E 's/.*\.\.\/([a-z0-9-]+)"/\1/'); do
+            v=$(node -p "require('./$d/package.json').version")
+            if [ "$v" != "$WARLOCK_VERSION" ]; then echo "::error::$d is at $v"; bad=1; fi
+          done
+          exit $bad
+
+      - name: Install the workspace
+        working-directory: ws
+        run: pnpm install --frozen-lockfile
+
+      - name: Install the release runner
+        working-directory: ws/builder
+        run: npm ci --no-audit --no-fund
+
+      - name: Gate (strictness, tests, typecheck, build, pack, local-registry install)
+        working-directory: ws/builder
+        run: |
+          set -o pipefail
+          node --import tsx scripts/release-family.ts gate --version "$WARLOCK_VERSION" --matrix none 2>&1 | tee "$LOGS/gate.log"
+
+      - name: Keep the tarballs and handoff
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: warlock-${{ inputs.version }}-artifacts
+          path: |
+            ws/builder/release-artifacts/${{ inputs.version }}
+            ws/builder/release-handoffs/warlock-${{ inputs.version }}.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Install the browser for the blog check
+        run: node ws/web/node_modules/@playwright/test/cli.js install --with-deps chromium
+
+      - name: Blog on the release tarballs
+        env:
+          MODE: tarballs
+          TARBALL_DIR: ${{ github.workspace }}/ws/builder/release-artifacts/${{ inputs.version }}
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/ws/web/node_modules/@playwright/test/index.mjs
+          EVIDENCE_PATH: ${{ github.workspace }}/logs/blog-tarballs.json
+        run: |
+          set -o pipefail
+          node ws/builder/ci/blog-check.mjs 2>&1 | tee "$LOGS/blog-tarballs.log"
+
+      - name: Publish to npm
+        if: inputs.publish
+        working-directory: ws/builder
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -o pipefail
+          node --import tsx scripts/release-family.ts publish --version "$WARLOCK_VERSION" 2>&1 | tee "$LOGS/publish.log"
+
+      - name: Confirm at npm, then tag and push
+        if: inputs.publish
+        working-directory: ws/builder
+        env:
+          GIT_CONFIG_COUNT: "1"
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ secrets.RELEASE_GH_TOKEN }}@github.com/.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/
+        # A 404 right after publish is propagation lag: rerun confirm, never republish.
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3 4 5 6 7 8 9 10; do
+            echo "confirm attempt $attempt"
+            if node --import tsx scripts/release-family.ts confirm --version "$WARLOCK_VERSION" 2>&1 | tee -a "$LOGS/confirm.log"; then
+              exit 0
+            fi
+            sleep 60
+          done
+          echo "::error::confirm did not pass after 10 attempts"; exit 1
+
+      - name: Blog from the registry
+        if: inputs.publish
+        env:
+          MODE: registry
+          PLAYWRIGHT_MODULE: ${{ github.workspace }}/ws/web/node_modules/@playwright/test/index.mjs
+          EVIDENCE_PATH: ${{ github.workspace }}/logs/blog-registry.json
+        run: |
+          set -o pipefail
+          git -C "$BLOG_DIR" checkout -- . && git -C "$BLOG_DIR" clean -fdxq
+          node ws/builder/ci/blog-check.mjs 2>&1 | tee "$LOGS/blog-registry.log"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: warlock-${{ inputs.version }}-logs
+          path: logs
+          if-no-files-found: ignore
+          retention-days: 30

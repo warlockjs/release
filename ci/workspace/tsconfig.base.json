@@ -1,0 +1,11 @@
+{
+  // Shared source-consumption strictness contract. Workspace packages are
+  // compiled under each consumer's TypeScript options, so a package may add to
+  // this contract but must not subtract from it: doing so hides consumer-facing
+  // diagnostics until a downstream package happens to compile the same source.
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true
+  }
+}

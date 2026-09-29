@@ -1,0 +1,56 @@
+node_modules/
+builder/
+dist/
+esm/
+cjs/
+coverage/
+pnpm-lock.yaml
+
+# The scaffold template declares `prettier-plugin-organize-imports`, which is only
+# installed inside a SCAFFOLDED app — never in this monorepo — so including it here
+# aborts the whole workspace run with "Cannot find package". It has its own gate:
+# create-warlock/scripts/format-check-template.mjs (88 files, run in create-warlock's CI).
+create-warlock/
+
+# Scratch and scaffold output, not source.
+temp/
+
+# Transient output of the skill-snippet compile gate; the blocks are deliberately partial.
+.skill-snippet-gate-tmp/
+
+# --- Not source. -------------------------------------------------------------
+# The formatting gate's subject is the PUBLISHABLE PACKAGE SOURCE. Everything
+# below is workspace furniture — agent/tool state, scratch, notes, superseded
+# release trees and generated diagnostics. Formatting them would put thousands
+# of files nobody edits by hand in front of every gate run, which is how a
+# mechanical gate becomes something people learn to skip.
+.bureau/
+.bureau-analysis/
+.claude/
+.codex/
+scratchpad/
+temp/
+dogfood/
+plans/
+implementation/
+handoffs/
+reports/
+reviews/
+proofs/
+diagnostics/
+discussions/
+conversations/
+features/
+roadmaps/
+releases/
+release/
+security/
+contracts/
+design/
+backlog/
+notes/
+v5/
+v5.1/
+v5.2/
+v5.3/
+.security-audit/

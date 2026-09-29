@@ -1,0 +1,90 @@
+packages:
+  - access
+  - ai
+  - ai-anthropic
+  - ai-bedrock
+  - ai-deepseek
+  - ai-google
+  - ai-groq
+  - ai-live
+  - ai-mistral
+  - ai-ollama
+  - ai-openai
+  - ai-panoptic
+  - ai-tools
+  - ai-workspace
+  - ai-xai
+  - auth
+  - cache
+  - cascade
+  - context
+  - core
+  - create-warlock
+  - devtools
+  - docs
+  - fs
+  - herald
+  - logger
+  - notifications
+  - queue
+  - scheduler
+  - seal
+  - sitemap
+  - web
+
+# Dependency install-scripts are BLOCKED by default — pnpm's supply-chain protection.
+# yarn 1 ran every one of them unconditionally, so this is a security improvement we are
+# keeping. The allowlist stays minimal and evidence-driven, never a blanket approval:
+# a package earns `true` only if its install script is genuinely REQUIRED and it is a
+# DIRECT dependency of one of our own packages. Everything else is an explicit `false`
+# so the decision is recorded rather than merely absent.
+allowBuilds:
+  # native binary, direct dependency of core — does not function without its install script
+  esbuild: true
+  # native binary, direct dependency of core and docs — same
+  sharp: true
+  # direct dependency of ai-google, but nothing has shown its script is needed
+  "@google/genai": false
+  # transitive only (via testcontainers / ssh2); not required
+  protobufjs: false
+  cpu-features: false
+  ssh2: false
+  # transitive via bullmq (optional native msgpack speed-up; msgpackr falls back to pure JS)
+  msgpackr-extract: false
+
+# The family publishes all 28 packages at one version, so EVERY release is
+# younger than pnpm's default release-age gate. Excluding by version pins a line
+# per package per release and goes stale the moment we publish again; the scope
+# pattern never needs editing. Matches create-warlock's workspace file.
+minimumReleaseAgeExclude:
+  - '@warlock.js/*'
+  - '@mongez/localization@3.5.0'
+  - '@mongez/collection@1.4.1'
+  - '@mongez/concat-route@1.2.1'
+  - '@mongez/config@1.2.2'
+  - '@mongez/copper@2.1.3'
+  - '@mongez/dotenv@1.3.3'
+  - '@mongez/encryption@2.0.2'
+  - '@mongez/events@2.2.8'
+  - '@mongez/vite@2.2.1'
+
+# Hoisted into the ROOT node_modules for TOOLING VISIBILITY only.
+#
+# agent-kit's `sync` discovers skills by scanning the root node_modules for packages
+# that ship a skills/ directory. Under yarn's hoisted tree every transitive @mongez and
+# every workspace @warlock.js package was visible there. pnpm strict exposes only what
+# the ROOT itself declares - 7 of 23 @mongez packages, and none of the workspace ones -
+# so a sync rebuilt the skills catalogue from a fraction of its sources and deleted the
+# rest. @types/* is here for tsc for the same reason.
+#
+# This changes only what is VISIBLE at the root. It does not change what any package can
+# RESOLVE, so the strict-linking property this migration exists to get is untouched:
+# every package still has to declare what it imports.
+publicHoistPattern:
+  - "@types/*"
+  - "@mongez/*"
+  - "@warlock.js/*"
+
+# CI only: resolve @warlock.js/* specs against the checked-out siblings. The
+# candidate is unpublished while it is gated, so the registry cannot serve it.
+linkWorkspacePackages: true
