@@ -2672,12 +2672,17 @@ async function defaultRunStrictnessGate(): Promise<StrictnessGateRunResult> {
 }
 
 const MAX_COMMAND_FAILURE_STREAM_CHARS = 32_000;
+const COMMAND_FAILURE_HEAD_CHARS = 4_000;
 
 export function formatCommandFailureOutput(stdout: string, stderr: string): string {
-  const bounded = (value: string) =>
-    value.length <= MAX_COMMAND_FAILURE_STREAM_CHARS
-      ? value
-      : `${value.slice(0, MAX_COMMAND_FAILURE_STREAM_CHARS)}\n[output truncated after ${MAX_COMMAND_FAILURE_STREAM_CHARS} characters]`;
+  // Test runners print their failure summary LAST, so a bounded stream keeps a
+  // short head (how it started) and a long tail (what failed).
+  const bounded = (value: string) => {
+    if (value.length <= MAX_COMMAND_FAILURE_STREAM_CHARS) return value;
+    const tailChars = MAX_COMMAND_FAILURE_STREAM_CHARS - COMMAND_FAILURE_HEAD_CHARS;
+    const omitted = value.length - MAX_COMMAND_FAILURE_STREAM_CHARS;
+    return `${value.slice(0, COMMAND_FAILURE_HEAD_CHARS)}\n[... ${omitted} characters omitted ...]\n${value.slice(-tailChars)}`;
+  };
   const streams = [
     stderr ? `stderr:\n${bounded(stderr)}` : "",
     stdout ? `stdout:\n${bounded(stdout)}` : "",

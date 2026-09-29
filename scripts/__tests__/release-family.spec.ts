@@ -75,6 +75,15 @@ describe("command failure output", () => {
     assert.match(output, /stderr:[\s\S]*typecheck failed/);
     assert.match(output, /stdout:[\s\S]*TS2322/);
   });
+
+  it("keeps the END of an oversized stream, where a test runner prints what failed", () => {
+    const noise = "✓ passing spec\n".repeat(5_000);
+    const output = formatCommandFailureOutput(`${noise} FAIL src/broken.spec.ts > the one that failed\n`, "");
+
+    assert.ok(output.length < noise.length);
+    assert.match(output, /characters omitted/);
+    assert.match(output, /FAIL src\/broken\.spec\.ts > the one that failed/);
+  });
 });
 
 function fixture(overrides: Partial<ReleaseFamilyDependencies> = {}): {
