@@ -1,14 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, readFileSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -35,10 +27,7 @@ import {
   type WarlockFamily,
   type WarlockFamilyMember,
 } from "./warlock-family.ts";
-import {
-  runZeroEditGeneratorGate,
-  type GeneratorGateContext,
-} from "./zero-edit-generator-gate.ts";
+import { runZeroEditGeneratorGate, type GeneratorGateContext } from "./zero-edit-generator-gate.ts";
 import { runStrictnessGate, type StrictnessGateRunResult } from "./strictness-gate.ts";
 
 export const NPM_ORIGIN = "https://registry.npmjs.org";
@@ -51,11 +40,7 @@ const BUILD_ROOT = path.join(BUILDER_ROOT, "builds");
 const ARTIFACT_ROOT = path.join(BUILDER_ROOT, "release-artifacts");
 const HANDOFF_ROOT = path.join(BUILDER_ROOT, "release-handoffs");
 const CONFIG_PATH = path.join(BUILDER_ROOT, "pkgist.config.ts");
-const DEPENDENCY_FIELDS = [
-  "dependencies",
-  "peerDependencies",
-  "optionalDependencies",
-] as const;
+const DEPENDENCY_FIELDS = ["dependencies", "peerDependencies", "optionalDependencies"] as const;
 
 /**
  * The confirmation budget: how many times each still-unconfirmed subject is
@@ -140,9 +125,7 @@ export interface ReleaseOptions {
  * skipped for a stated reason. There is no third, unstated case -- a gate
  * run that produces a handoff always sets exactly one of these.
  */
-export type StrictnessGateOutcome =
-  | { status: "passed" }
-  | { status: "skipped"; reason: string };
+export type StrictnessGateOutcome = { status: "passed" } | { status: "skipped"; reason: string };
 
 /**
  * An owner authorisation to run the matrix, as it must appear in the release
@@ -430,7 +413,7 @@ export function assertMatrixScopeIsStated(options: {
     throw new Error(
       [
         `Refusing to run the matrix at scope "${scope}" with no recorded owner authorisation.`,
-        "Pass --authorised-by <name> --authorisation-date <YYYY-MM-DD> --authorisation \"<their words>\".",
+        'Pass --authorised-by <name> --authorisation-date <YYYY-MM-DD> --authorisation "<their words>".',
         "",
         "The matrix is opt-in and only the owner opts in. This runner cannot read Bureau, so it",
         "cannot check that the authorisation is real -- what it can do is refuse to invent one.",
@@ -443,7 +426,9 @@ export function assertMatrixScopeIsStated(options: {
     throw new Error("--authorised-by must name a person.");
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(authorisation.date)) {
-    throw new Error(`--authorisation-date must be an ISO date (YYYY-MM-DD); got "${authorisation.date}".`);
+    throw new Error(
+      `--authorisation-date must be an ISO date (YYYY-MM-DD); got "${authorisation.date}".`,
+    );
   }
   if (!authorisation.quote.trim()) {
     throw new Error("--authorisation must carry the owner's actual words, not an empty string.");
@@ -486,7 +471,7 @@ async function prepareAndGate(
     console.warn(
       "[release-family] MATRIX NOT RUN (--matrix none): the local registry is still owned, all 28 tarballs " +
         "are still staged and every member is still confirmed installable — but the zero-edit generator " +
-        "matrix, the only check that answers \"does what we publish actually work?\", does not run. " +
+        'matrix, the only check that answers "does what we publish actually work?", does not run. ' +
         "The handoff will record matrixScope=none, and that MUST reach the release summary and releases.json.",
     );
   }
@@ -539,7 +524,7 @@ async function prepareAndGate(
   const gated = await runtime.runLocalGate(
     {
       candidateVersion: version,
-      expectedFamilyNames: family.members.map(member => member.name),
+      expectedFamilyNames: family.members.map((member) => member.name),
       artifacts,
       // The generator gate's three adapter paths are read from the
       // environment exactly once, here, at the outermost entry point, and
@@ -558,8 +543,8 @@ async function prepareAndGate(
   );
   const handoff: ReleaseHandoff = {
     ...gated,
-    artifacts: gated.artifacts.map(artifact => ({ ...artifact })),
-    subjects: family.members.map(member => member.name),
+    artifacts: gated.artifacts.map((artifact) => ({ ...artifact })),
+    subjects: family.members.map((member) => member.name),
     strictness,
     ...(options.matrixAuthorisation ? { matrixAuthorisation: options.matrixAuthorisation } : {}),
     ...(reusedArtifacts ? { reusedArtifacts: true, reuseProvenance } : {}),
@@ -596,11 +581,11 @@ async function runStrictnessRatchet(
     return { status: "passed" };
   }
 
-  const offenders = result.packages.filter(pkg => pkg.unmeasured || pkg.over > 0);
+  const offenders = result.packages.filter((pkg) => pkg.unmeasured || pkg.over > 0);
   throw new Error(
     [
       "Refusing to gate: the workspace strictness ratchet is red.",
-      ...offenders.map(pkg =>
+      ...offenders.map((pkg) =>
         pkg.unmeasured
           ? `  - ${pkg.dir}: UNMEASURED`
           : `  - ${pkg.dir}: ${pkg.count} owned diagnostics / allowance ${pkg.allowance} (OVER by ${pkg.over})`,
@@ -666,7 +651,11 @@ async function buildAndPackAllMembers(
     // publication -- which is exactly what happened to `create-warlock`
     // (measured parked on `fix/scaffold-npm-arborist`) and would have passed
     // every other check unnoticed.
-    const branchCheck = await checkPackageBranchMatchesOrigin(member, allowedBranchOverrides, runtime);
+    const branchCheck = await checkPackageBranchMatchesOrigin(
+      member,
+      allowedBranchOverrides,
+      runtime,
+    );
     if (!branchCheck.passed) {
       branchRefusals.push(branchCheck.refusalMessage);
       continue;
@@ -773,9 +762,13 @@ async function buildAndPackAllMembers(
     // `continue`s above) — this refuses the release as a whole only now,
     // after every member has had its own independent chance, never before.
     throw new Error(
-      [...dirtyTreeRefusals, ...qualityRefusals, ...branchRefusals, ...lockfileRefusals, ...commitRefusals].join(
-        "\n\n",
-      ),
+      [
+        ...dirtyTreeRefusals,
+        ...qualityRefusals,
+        ...branchRefusals,
+        ...lockfileRefusals,
+        ...commitRefusals,
+      ].join("\n\n"),
     );
   }
 
@@ -823,7 +816,10 @@ async function writeProvenance(
     version,
     members,
   };
-  await runtime.writeTextFile(provenancePath(artifactDirectory), `${JSON.stringify(provenance, null, 2)}\n`);
+  await runtime.writeTextFile(
+    provenancePath(artifactDirectory),
+    `${JSON.stringify(provenance, null, 2)}\n`,
+  );
 }
 
 interface ArtifactReuseAttempt {
@@ -860,7 +856,7 @@ export async function attemptArtifactReuse(
     };
   }
 
-  const byName = new Map(provenance.members.map(entry => [entry.name, entry]));
+  const byName = new Map(provenance.members.map((entry) => [entry.name, entry]));
   const artifacts: CandidateArtifact[] = [];
   const kept: BuildProvenanceEntry[] = [];
 
@@ -887,8 +883,7 @@ export async function attemptArtifactReuse(
     if (actualHash !== entry.sha256.toLowerCase()) {
       return {
         reusable: false,
-        reason:
-          `recorded tarball for ${member.name} re-hashed to ${actualHash}, expected ${entry.sha256}.`,
+        reason: `recorded tarball for ${member.name} re-hashed to ${actualHash}, expected ${entry.sha256}.`,
         artifacts: [],
         provenance: [],
       };
@@ -930,12 +925,17 @@ async function getGitHead(member: WarlockFamilyMember, runtime: Runtime): Promis
   });
   const head = result.stdout.trim().toLowerCase();
   if (!/^[0-9a-f]{40}$/.test(head)) {
-    throw new Error(`Cannot resolve git HEAD for ${member.name}: unexpected output "${result.stdout.trim()}".`);
+    throw new Error(
+      `Cannot resolve git HEAD for ${member.name}: unexpected output "${result.stdout.trim()}".`,
+    );
   }
   return head;
 }
 
-async function getRawGitStatus(member: WarlockFamilyMember, runtime: Runtime): Promise<DirtyPathEntry[]> {
+async function getRawGitStatus(
+  member: WarlockFamilyMember,
+  runtime: Runtime,
+): Promise<DirtyPathEntry[]> {
   const result = await runtime.runCommand({
     command: "git",
     args: ["status", "--porcelain=v1", "--untracked-files=all"],
@@ -945,7 +945,10 @@ async function getRawGitStatus(member: WarlockFamilyMember, runtime: Runtime): P
   return parseGitPorcelain(result.stdout);
 }
 
-function sameDirtyEntries(left: readonly DirtyPathEntry[], right: readonly DirtyPathEntry[]): boolean {
+function sameDirtyEntries(
+  left: readonly DirtyPathEntry[],
+  right: readonly DirtyPathEntry[],
+): boolean {
   if (left.length !== right.length) return false;
   const key = (entry: DirtyPathEntry) => `${entry.status} ${entry.path}`;
   const sortedLeft = left.map(key).sort();
@@ -990,8 +993,8 @@ export interface PackageCleanlinessResult {
  * silently answer a question this repo's build never asks.
  */
 export function resolveFamilyPackageConfig(name: string): FamilyPackage | undefined {
-  const family = pkgistConfig.families?.find(candidate => candidate.name === WARLOCK_FAMILY_NAME);
-  return family?.packages.find(candidate => candidate.name === name);
+  const family = pkgistConfig.families?.find((candidate) => candidate.name === WARLOCK_FAMILY_NAME);
+  return family?.packages.find((candidate) => candidate.name === name);
 }
 
 /**
@@ -1024,7 +1027,9 @@ function normalizeRelative(value: string): string {
 }
 
 function isWithinSurface(relativePath: string, roots: readonly string[]): boolean {
-  return roots.some(root => root === "." || relativePath === root || relativePath.startsWith(`${root}/`));
+  return roots.some(
+    (root) => root === "." || relativePath === root || relativePath.startsWith(`${root}/`),
+  );
 }
 
 /** Parse `git status --porcelain=v1 --untracked-files=all` output. */
@@ -1100,7 +1105,7 @@ export async function checkPackageTreeIsClean(
         : "no pkgist.config.ts entry found for this package -- treating the ENTIRE package tree as published"
     }`,
     "Offending paths:",
-    ...dirtyInSurface.map(entry => `  - ${entry.path} (git "${entry.status}")`),
+    ...dirtyInSurface.map((entry) => `  - ${entry.path} (git "${entry.status}")`),
     `Fix: commit or revert these paths in ${member.name}'s own git repository before releasing this ` +
       `family. If a path genuinely never ships, exclude it from the published surface (srcDir/clone in ` +
       `pkgist.config.ts) instead of releasing over it.`,
@@ -1189,7 +1194,7 @@ export async function checkPackageOwnQuality(
     `Refusing to pack ${member.name}: its own quality gate is red.`,
     `Package root: ${member.root}`,
     "Failing scripts:",
-    ...failures.map(failure => `  - ${failure}`),
+    ...failures.map((failure) => `  - ${failure}`),
     `Fix: make ${member.name}'s own failing script(s) pass in its own repository before ` +
       `releasing this family.`,
   ].join("\n");
@@ -1256,7 +1261,7 @@ export async function checkPackageBranchMatchesOrigin(
         `Package root: ${member.root}`,
         `Checked-out branch: ${checkedOutBranch}`,
         '"git ls-remote --symref origin HEAD" (asking the remote directly, never a local cache) ' +
-          "returned no parseable \"ref: refs/heads/<name>\\tHEAD\" line.",
+          'returned no parseable "ref: refs/heads/<name>\\tHEAD" line.',
         "An unresolvable default is refused, never assumed.",
       ].join("\n"),
       checkedOutBranch,
@@ -1266,11 +1271,23 @@ export async function checkPackageBranchMatchesOrigin(
   }
 
   if (checkedOutBranch === remoteDefaultBranch) {
-    return { passed: true, refusalMessage: "", checkedOutBranch, remoteDefaultBranch, overridden: false };
+    return {
+      passed: true,
+      refusalMessage: "",
+      checkedOutBranch,
+      remoteDefaultBranch,
+      overridden: false,
+    };
   }
 
   if (allowedOverrides.has(member.name)) {
-    return { passed: true, refusalMessage: "", checkedOutBranch, remoteDefaultBranch, overridden: true };
+    return {
+      passed: true,
+      refusalMessage: "",
+      checkedOutBranch,
+      remoteDefaultBranch,
+      overridden: true,
+    };
   }
 
   const refusalMessage = [
@@ -1284,7 +1301,13 @@ export async function checkPackageBranchMatchesOrigin(
       `family, or pass --allow-branch ${member.name} to explicitly authorise this deliberate branch release.`,
   ].join("\n");
 
-  return { passed: false, refusalMessage, checkedOutBranch, remoteDefaultBranch, overridden: false };
+  return {
+    passed: false,
+    refusalMessage,
+    checkedOutBranch,
+    remoteDefaultBranch,
+    overridden: false,
+  };
 }
 
 /** The one lockfile name this checks for; a member with no file by this name is left untouched. */
@@ -1359,12 +1382,7 @@ export async function regenerateMemberLockfile(
 
     await runtime.runCommand({
       command: process.execPath,
-      args: [
-        runtime.resolvePnpmCli(),
-        "install",
-        "--lockfile-only",
-        "--ignore-scripts",
-      ],
+      args: [runtime.resolvePnpmCli(), "install", "--lockfile-only", "--ignore-scripts"],
       cwd: stagingRoot,
       env: { ...process.env },
     });
@@ -1372,12 +1390,7 @@ export async function regenerateMemberLockfile(
 
     await runtime.runCommand({
       command: process.execPath,
-      args: [
-        runtime.resolvePnpmCli(),
-        "install",
-        "--frozen-lockfile",
-        "--ignore-scripts",
-      ],
+      args: [runtime.resolvePnpmCli(), "install", "--frozen-lockfile", "--ignore-scripts"],
       cwd: stagingRoot,
       env: { ...process.env },
     });
@@ -1524,7 +1537,10 @@ export function resolveLocalPackageScript(
   memberRoot: string,
   scriptCommand: string,
 ): ResolvedScriptInvocation {
-  const tokens = scriptCommand.trim().split(/\s+/).filter(token => token.length > 0);
+  const tokens = scriptCommand
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
   let index = 0;
   if (tokens[index] === "npx") {
     index += 1;
@@ -1726,7 +1742,22 @@ async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promis
       await assertArtifactHash(artifact, runtime.sha256File);
       await runtime.runCommand({
         command: process.execPath,
-        args: [runtime.resolveNpmCli(), "publish", artifact.tarballPath, "--registry", NPM_ORIGIN, "--access", "public", "--ignore-scripts", "--cache", cache, "--userconfig", userconfig, "--globalconfig", globalconfig],
+        args: [
+          runtime.resolveNpmCli(),
+          "publish",
+          artifact.tarballPath,
+          "--registry",
+          NPM_ORIGIN,
+          "--access",
+          "public",
+          "--ignore-scripts",
+          "--cache",
+          cache,
+          "--userconfig",
+          userconfig,
+          "--globalconfig",
+          globalconfig,
+        ],
         cwd: root,
         env,
       });
@@ -1758,7 +1789,7 @@ export async function confirmSubjectsAtOrigin(
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
   const statuses = new Map<string, SubjectConfirmationStatus>(
-    handoff.subjects.map(name => [name, "pending"]),
+    handoff.subjects.map((name) => [name, "pending"]),
   );
 
   runtime.report(
@@ -1797,7 +1828,9 @@ export async function confirmSubjectsAtOrigin(
       const observed = parseJsonOrText(result.stdout);
       if (observed === handoff.candidateVersion) {
         statuses.set(name, "live");
-        runtime.report(`${name}: live (confirmed on attempt ${attempt}/${CONFIRMATION_MAX_ATTEMPTS})`);
+        runtime.report(
+          `${name}: live (confirmed on attempt ${attempt}/${CONFIRMATION_MAX_ATTEMPTS})`,
+        );
       } else if (attempt === CONFIRMATION_MAX_ATTEMPTS) {
         statuses.set(name, "missing");
         runtime.report(`${name}: MISSING after ${CONFIRMATION_MAX_ATTEMPTS} attempt(s)`);
@@ -1806,14 +1839,18 @@ export async function confirmSubjectsAtOrigin(
       }
     }
 
-    const stillPending = [...statuses.values()].some(status => status === "pending");
+    const stillPending = [...statuses.values()].some((status) => status === "pending");
     if (stillPending && attempt < CONFIRMATION_MAX_ATTEMPTS) {
       await runtime.sleep(CONFIRMATION_RETRY_DELAY_MS);
     }
   }
 
-  const live = [...statuses.entries()].filter(([, status]) => status === "live").map(([name]) => name);
-  const missing = [...statuses.entries()].filter(([, status]) => status === "missing").map(([name]) => name);
+  const live = [...statuses.entries()]
+    .filter(([, status]) => status === "live")
+    .map(([name]) => name);
+  const missing = [...statuses.entries()]
+    .filter(([, status]) => status === "missing")
+    .map(([name]) => name);
 
   runtime.report(
     `Origin confirmation summary: ${live.length}/${handoff.subjects.length} live` +
@@ -1974,7 +2011,9 @@ async function resolveMemberBranch(member: WarlockFamilyMember, runtime: Runtime
   });
   const branch = result.stdout.trim();
   if (!branch || branch === "HEAD") {
-    throw new Error(`Cannot resolve a branch for ${member.name}: HEAD is detached (got "${branch}").`);
+    throw new Error(
+      `Cannot resolve a branch for ${member.name}: HEAD is detached (got "${branch}").`,
+    );
   }
   return branch;
 }
@@ -2007,7 +2046,7 @@ async function resolveOriginDefaultBranch(
     cwd: member.root,
     env: { ...process.env },
   });
-  const symrefLine = result.stdout.split(/\r?\n/).find(line => line.startsWith("ref:"));
+  const symrefLine = result.stdout.split(/\r?\n/).find((line) => line.startsWith("ref:"));
   const match = symrefLine?.match(/^ref:\s+refs\/heads\/(\S+)\s+HEAD$/);
   return match?.[1];
 }
@@ -2024,11 +2063,13 @@ async function resolveOriginRefSha(
     cwd: member.root,
     env: { ...process.env },
   });
-  const line = result.stdout.split(/\r?\n/).find(value => value.trim().length > 0);
+  const line = result.stdout.split(/\r?\n/).find((value) => value.trim().length > 0);
   if (!line) return undefined;
   const sha = line.split(/\s+/)[0]?.toLowerCase();
   if (!sha || !/^[0-9a-f]{40}$/.test(sha)) {
-    throw new Error(`Cannot parse "git ls-remote origin ${ref}" output for ${member.name}: "${line}".`);
+    throw new Error(
+      `Cannot parse "git ls-remote origin ${ref}" output for ${member.name}: "${line}".`,
+    );
   }
   return sha;
 }
@@ -2066,7 +2107,7 @@ async function listCommitsBetween(
       cwd: member.root,
       env: { ...process.env },
     });
-    return result.stdout.split(/\r?\n/).filter(line => line.trim().length > 0);
+    return result.stdout.split(/\r?\n/).filter((line) => line.trim().length > 0);
   } catch {
     return [];
   }
@@ -2134,7 +2175,7 @@ export async function tagAndPushMember(
           offending.length > 0
             ? `Commits on origin/${branch} beyond ${sha}:`
             : `origin/${branch} could not be explained relative to ${sha}.`,
-          ...offending.map(line => `  - ${line}`),
+          ...offending.map((line) => `  - ${line}`),
         ].join("\n"),
         branch,
       );
@@ -2244,8 +2285,8 @@ export async function tagAndPushAllMembers(
         `${artifactDirectory} -- cannot recover each member's recorded release commit.`,
     );
   }
-  const provenanceByName = new Map(provenance.members.map(entry => [entry.name, entry]));
-  const membersByName = new Map(family.members.map(member => [member.name, member]));
+  const provenanceByName = new Map(provenance.members.map((entry) => [entry.name, entry]));
+  const membersByName = new Map(family.members.map((member) => [member.name, member]));
 
   const results: MemberTagPushOutcome[] = [];
   const refusals: string[] = [];
@@ -2295,7 +2336,9 @@ function assertGeneratedPins(manifest: BuiltManifest, version: string): void {
       if (!name.startsWith("@warlock.js/")) continue;
       found += 1;
       if (specification !== version) {
-        throw new Error(`Generated ${field}.${name} must equal ${version}; found ${specification}.`);
+        throw new Error(
+          `Generated ${field}.${name} must equal ${version}; found ${specification}.`,
+        );
       }
     }
   }
@@ -2313,20 +2356,46 @@ async function npmLsAndExecute(
 ): Promise<void> {
   await runtime.runCommand({
     command: process.execPath,
-    args: [runtime.resolveNpmCli(), "ls", "--all", "--registry", NPM_ORIGIN, "--cache", cache, "--userconfig", npmrc, "--globalconfig", globalNpmrc],
+    args: [
+      runtime.resolveNpmCli(),
+      "ls",
+      "--all",
+      "--registry",
+      NPM_ORIGIN,
+      "--cache",
+      cache,
+      "--userconfig",
+      npmrc,
+      "--globalconfig",
+      globalNpmrc,
+    ],
     cwd,
     env,
   });
   const physical = await runtime.runCommand({
     command: process.execPath,
-    args: [runtime.resolveNpmCli(), "ls", "@warlock.js/core", "--all", "--parseable", "--registry", NPM_ORIGIN, "--cache", cache, "--userconfig", npmrc, "--globalconfig", globalNpmrc],
+    args: [
+      runtime.resolveNpmCli(),
+      "ls",
+      "@warlock.js/core",
+      "--all",
+      "--parseable",
+      "--registry",
+      NPM_ORIGIN,
+      "--cache",
+      cache,
+      "--userconfig",
+      npmrc,
+      "--globalconfig",
+      globalNpmrc,
+    ],
     cwd,
     env,
   });
   const corePaths = physical.stdout
     .split(/\r?\n/)
-    .map(value => value.trim())
-    .filter(value => /[\\/]node_modules[\\/]@warlock\.js[\\/]core$/i.test(value));
+    .map((value) => value.trim())
+    .filter((value) => /[\\/]node_modules[\\/]@warlock\.js[\\/]core$/i.test(value));
   assertSinglePhysicalCore(corePaths);
   await runtime.runCommand({
     command: process.execPath,
@@ -2343,9 +2412,11 @@ async function npmLsAndExecute(
 }
 
 export function assertSinglePhysicalCore(corePaths: readonly string[]): void {
-  const unique = new Set(corePaths.map(value => path.resolve(value).toLowerCase()));
+  const unique = new Set(corePaths.map((value) => path.resolve(value).toLowerCase()));
   if (corePaths.length !== 1 || unique.size !== 1) {
-    throw new Error(`Expected exactly one physical @warlock.js/core install; found ${corePaths.length}.`);
+    throw new Error(
+      `Expected exactly one physical @warlock.js/core install; found ${corePaths.length}.`,
+    );
   }
 }
 
@@ -2370,10 +2441,14 @@ function parseAndValidateHandoff(
       `Publish handoff version mismatch: expected ${version}, found ${String(record.candidateVersion)}.`,
     );
   }
-  if (!Array.isArray(record.subjects) || !record.subjects.every(item => typeof item === "string")) {
+  if (
+    !Array.isArray(record.subjects) ||
+    !record.subjects.every((item) => typeof item === "string")
+  ) {
     throw new Error("Publish handoff subjects must be a string array.");
   }
-  if (!Array.isArray(record.artifacts)) throw new Error("Publish handoff artifacts must be an array.");
+  if (!Array.isArray(record.artifacts))
+    throw new Error("Publish handoff artifacts must be an array.");
   const artifacts = record.artifacts.map(parseHandoffArtifact);
   const matrixScope = parseHandoffMatrixScope(record.matrixScope);
   const matrixRows = parseHandoffMatrixRows(record.matrixRows);
@@ -2392,11 +2467,16 @@ function parseAndValidateHandoff(
       : {}),
     ...(strictness ? { strictness } : {}),
   } satisfies ReleaseHandoff;
-  const expected = family.members.map(member => member.name);
+  const expected = family.members.map((member) => member.name);
   if (!equalStrings(handoff.subjects, expected)) {
     throw new Error("Publish handoff subject list is missing, added, or out of order.");
   }
-  if (!equalStrings(handoff.artifacts.map(artifact => artifact.name), expected)) {
+  if (
+    !equalStrings(
+      handoff.artifacts.map((artifact) => artifact.name),
+      expected,
+    )
+  ) {
     throw new Error("Publish handoff artifact list is missing, added, or out of order.");
   }
   return handoff;
@@ -2435,19 +2515,27 @@ function parseHandoffMatrixScope(value: unknown): MatrixScope {
 function parseHandoffStrictness(value: unknown): StrictnessGateOutcome | undefined {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object") {
-    throw new Error(`Publish handoff strictness must be an object when present (found ${JSON.stringify(value)}).`);
+    throw new Error(
+      `Publish handoff strictness must be an object when present (found ${JSON.stringify(value)}).`,
+    );
   }
   const record = value as Record<string, unknown>;
   if (record.status === "passed") return { status: "passed" };
-  if (record.status === "skipped" && typeof record.reason === "string" && record.reason.trim().length > 0) {
+  if (
+    record.status === "skipped" &&
+    typeof record.reason === "string" &&
+    record.reason.trim().length > 0
+  ) {
     return { status: "skipped", reason: record.reason };
   }
-  throw new Error(`Publish handoff carries an invalid strictness record: ${JSON.stringify(value)}.`);
+  throw new Error(
+    `Publish handoff carries an invalid strictness record: ${JSON.stringify(value)}.`,
+  );
 }
 
 function parseHandoffMatrixRows(value: unknown): readonly string[] | undefined {
   if (value === undefined) return undefined;
-  if (!Array.isArray(value) || !value.every(item => typeof item === "string")) {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
     throw new Error("Publish handoff matrixRows must be a string array when present.");
   }
   return value as readonly string[];
@@ -2465,7 +2553,11 @@ function parseHandoffArtifact(value: unknown): CandidateArtifact {
   ) {
     throw new Error(`Invalid artifact in publish handoff for ${String(record.name)}.`);
   }
-  return { name: record.name, tarballPath: record.tarballPath, sha256: record.sha256.toLowerCase() };
+  return {
+    name: record.name,
+    tarballPath: record.tarballPath,
+    sha256: record.sha256.toLowerCase(),
+  };
 }
 
 async function verifyAllArtifactHashes(
@@ -2493,8 +2585,14 @@ function assertHandoffMatchesArtifacts(
   artifacts: readonly CandidateArtifact[],
   version: string,
 ): void {
-  if (handoff.candidateVersion !== version) throw new Error("Local gate changed candidate version.");
-  if (!equalStrings(handoff.artifacts.map(item => item.name), artifacts.map(item => item.name))) {
+  if (handoff.candidateVersion !== version)
+    throw new Error("Local gate changed candidate version.");
+  if (
+    !equalStrings(
+      handoff.artifacts.map((item) => item.name),
+      artifacts.map((item) => item.name),
+    )
+  ) {
     throw new Error("Local gate changed the ordered artifact subject list.");
   }
   for (const [index, artifact] of artifacts.entries()) {
@@ -2511,7 +2609,8 @@ function assertHandoffMatchesArtifacts(
 function parseManifest(source: string, label: string): BuiltManifest {
   try {
     const parsed = JSON.parse(source);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      throw new Error("not an object");
     return parsed as BuiltManifest;
   } catch (error) {
     throw new Error(`Cannot parse manifest for ${label}: ${formatError(error)}.`);
@@ -2538,18 +2637,20 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
   return {
     loadFamily: dependencies.loadFamily ?? (() => loadAuthoritativeWarlockFamily(WORKSPACE_ROOT)),
     runCommand: dependencies.runCommand ?? defaultRunCommand,
-    readTextFile: dependencies.readTextFile ?? (filePath => readFile(filePath, "utf8")),
+    readTextFile: dependencies.readTextFile ?? ((filePath) => readFile(filePath, "utf8")),
     writeTextFile:
       dependencies.writeTextFile ?? ((filePath, contents) => writeFile(filePath, contents, "utf8")),
     inspectArtifact: dependencies.inspectArtifact ?? inspectArtifact,
     makeDirectory:
-      dependencies.makeDirectory ?? (directory => mkdir(directory, { recursive: true }).then(() => undefined)),
+      dependencies.makeDirectory ??
+      ((directory) => mkdir(directory, { recursive: true }).then(() => undefined)),
     makeTemporaryDirectory:
-      dependencies.makeTemporaryDirectory ?? (prefix => mkdtemp(path.join(tmpdir(), prefix))),
+      dependencies.makeTemporaryDirectory ?? ((prefix) => mkdtemp(path.join(tmpdir(), prefix))),
     removeDirectory:
-      dependencies.removeDirectory ?? (directory => rm(directory, { recursive: true, force: true })),
+      dependencies.removeDirectory ??
+      ((directory) => rm(directory, { recursive: true, force: true })),
     removeFile: dependencies.removeFile ?? removeFileIfPresent,
-    fileExists: dependencies.fileExists ?? (async filePath => existsSync(filePath)),
+    fileExists: dependencies.fileExists ?? (async (filePath) => existsSync(filePath)),
     writeHandoff: dependencies.writeHandoff ?? writeHandoffAtomically,
     sha256File: dependencies.sha256File ?? defaultSha256File,
     resolvePkgistCli: dependencies.resolvePkgistCli ?? resolvePkgistCli,
@@ -2559,8 +2660,10 @@ function withDefaults(dependencies: ReleaseFamilyDependencies): Runtime {
     runLocalGate: dependencies.runLocalGate ?? runLocalRegistryPreGate,
     runStrictnessGate: dependencies.runStrictnessGate ?? defaultRunStrictnessGate,
     now: dependencies.now ?? (() => new Date()),
-    report: dependencies.report ?? (line => console.log(line)),
-    sleep: dependencies.sleep ?? (milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))),
+    report: dependencies.report ?? ((line) => console.log(line)),
+    sleep:
+      dependencies.sleep ??
+      ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds))),
   };
 }
 
@@ -2592,12 +2695,17 @@ async function defaultRunCommand(request: CommandRequest): Promise<CommandResult
     });
     let stdout = "";
     let stderr = "";
-    child.stdout.setEncoding("utf8").on("data", chunk => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", chunk => (stderr += chunk));
+    child.stdout.setEncoding("utf8").on("data", (chunk) => (stdout += chunk));
+    child.stderr.setEncoding("utf8").on("data", (chunk) => (stderr += chunk));
     child.once("error", reject);
-    child.once("close", code => {
+    child.once("close", (code) => {
       if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(`${request.command} exited ${String(code)}: ${formatCommandFailureOutput(stdout, stderr)}`));
+      else
+        reject(
+          new Error(
+            `${request.command} exited ${String(code)}: ${formatCommandFailureOutput(stdout, stderr)}`,
+          ),
+        );
     });
   });
 }
@@ -2612,9 +2720,9 @@ export async function inspectArtifact(tarballPath: string): Promise<ArtifactInsp
   const archive = gunzipSync(await readFile(tarballPath));
   const entries: string[] = [];
   let manifest: BuiltManifest | undefined;
-  for (let offset = 0; offset + 512 <= archive.length; ) {
+  for (let offset = 0; offset + 512 <= archive.length;) {
     const header = archive.subarray(offset, offset + 512);
-    if (header.every(byte => byte === 0)) break;
+    if (header.every((byte) => byte === 0)) break;
     const name = tarText(header.subarray(0, 100));
     const prefix = tarText(header.subarray(345, 500));
     const entryPath = prefix ? `${prefix}/${name}` : name;
@@ -2641,7 +2749,11 @@ export async function inspectArtifact(tarballPath: string): Promise<ArtifactInsp
   // this tarball. Checked here, inside inspectArtifact itself, so EVERY gate
   // run applies it to EVERY packed tarball -- before its sha256 is taken and
   // before it reaches the publish handoff.
-  assertTarballContainsItsEntryPoints(String(manifest.name ?? tarballPath), manifest, new Set(entries));
+  assertTarballContainsItsEntryPoints(
+    String(manifest.name ?? tarballPath),
+    manifest,
+    new Set(entries),
+  );
 
   return { manifest, entries };
 }
@@ -2658,7 +2770,10 @@ function tarText(value: Uint8Array): string {
 async function writeHandoffAtomically(filePath: string, handoff: ReleaseHandoff): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(handoff, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+  await writeFile(temporaryPath, `${JSON.stringify(handoff, null, 2)}\n`, {
+    encoding: "utf8",
+    flag: "wx",
+  });
   await rename(temporaryPath, filePath);
 }
 
@@ -2695,8 +2810,38 @@ export function resolveNpmCli(): string {
   if (invokedByNpm && path.isAbsolute(invokedByNpm) && /npm-cli\.js$/i.test(invokedByNpm)) {
     return invokedByNpm;
   }
-  const adjacent = path.resolve(path.dirname(process.execPath), "node_modules/npm/bin/npm-cli.js");
-  return adjacent;
+  return firstExistingBesideNode(
+    process.env.WARLOCK_NPM_CLI,
+    "npm/bin/npm-cli.js",
+    "npm's JavaScript CLI (npm-cli.js)",
+  );
+}
+
+/**
+ * Where a global package sits relative to `process.execPath` depends on the
+ * platform layout: Windows (nvm, the official installer) keeps
+ * `node_modules` beside `node.exe`; Linux and macOS keep it in
+ * `<prefix>/lib/node_modules` with node in `<prefix>/bin`. An explicit
+ * absolute override wins, and a path that does not exist is an error here,
+ * not a confusing spawn failure later.
+ */
+function firstExistingBesideNode(override: string | undefined, entry: string, label: string): string {
+  if (override) {
+    if (!path.isAbsolute(override) || !existsSync(override)) {
+      throw new Error(`${label} override "${override}" must be an absolute path to an existing file.`);
+    }
+    return override;
+  }
+  const nodeDir = path.dirname(process.execPath);
+  const candidates = [
+    path.resolve(nodeDir, "node_modules", entry),
+    path.resolve(nodeDir, "..", "lib", "node_modules", entry),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    throw new Error(`Cannot find ${label} beside node; looked in: ${candidates.join(", ")}.`);
+  }
+  return found;
 }
 
 /**
@@ -2711,10 +2856,14 @@ export function resolveNpmCli(): string {
  */
 export function resolvePnpmCli(): string {
   const invokedByPnpm = process.env.npm_execpath;
-  if (invokedByPnpm && path.isAbsolute(invokedByPnpm) && /pnpm(?:\.c?js|\.mjs)$/i.test(invokedByPnpm)) {
+  if (
+    invokedByPnpm &&
+    path.isAbsolute(invokedByPnpm) &&
+    /pnpm(?:\.c?js|\.mjs)$/i.test(invokedByPnpm)
+  ) {
     return invokedByPnpm;
   }
-  return path.resolve(path.dirname(process.execPath), "node_modules/pnpm/bin/pnpm.mjs");
+  return firstExistingBesideNode(process.env.WARLOCK_PNPM_CLI, "pnpm/bin/pnpm.mjs", "pnpm's CLI (pnpm.mjs)");
 }
 
 function originEnvironment(
@@ -2766,7 +2915,9 @@ function assertEffectiveOrigin(
 
 function assertExactVersion(version: string): void {
   if (!EXACT_VERSION.test(version)) {
-    throw new Error(`--version is required and must be an exact semver; found ${JSON.stringify(version)}.`);
+    throw new Error(
+      `--version is required and must be an exact semver; found ${JSON.stringify(version)}.`,
+    );
   }
 }
 
@@ -2775,7 +2926,7 @@ function isStringRecord(value: unknown): value is Record<string, string> {
     value !== null &&
     typeof value === "object" &&
     !Array.isArray(value) &&
-    Object.values(value).every(item => typeof item === "string")
+    Object.values(value).every((item) => typeof item === "string")
   );
 }
 
@@ -2799,9 +2950,10 @@ function formatError(error: unknown): string {
 export function parseArguments(argv: readonly string[]): ReleaseOptions {
   const values = [...argv];
   const first = values[0];
-  const mode: ReleaseMode = first === "publish" || first === "confirm" || first === "gate"
-    ? (values.shift() as ReleaseMode)
-    : "gate";
+  const mode: ReleaseMode =
+    first === "publish" || first === "confirm" || first === "gate"
+      ? (values.shift() as ReleaseMode)
+      : "gate";
   let version = "";
   let handoffPath: string | undefined;
   let reuseArtifacts = false;
@@ -2821,18 +2973,24 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     else if (argument.startsWith("--handoff=")) handoffPath = argument.slice("--handoff=".length);
     else if (argument === "--reuse-artifacts") reuseArtifacts = true;
     else if (argument === "--only") only = parseOnlyArgument(values[++index]);
-    else if (argument.startsWith("--only=")) only = parseOnlyArgument(argument.slice("--only=".length));
+    else if (argument.startsWith("--only="))
+      only = parseOnlyArgument(argument.slice("--only=".length));
     else if (argument === "--matrix") matrixScope = parseMatrixScope(values[++index]);
-    else if (argument.startsWith("--matrix=")) matrixScope = parseMatrixScope(argument.slice("--matrix=".length));
+    else if (argument.startsWith("--matrix="))
+      matrixScope = parseMatrixScope(argument.slice("--matrix=".length));
     else if (argument === "--authorised-by") authorisedBy = values[++index];
-    else if (argument.startsWith("--authorised-by=")) authorisedBy = argument.slice("--authorised-by=".length);
+    else if (argument.startsWith("--authorised-by="))
+      authorisedBy = argument.slice("--authorised-by=".length);
     else if (argument === "--authorisation-date") authorisationDate = values[++index];
-    else if (argument.startsWith("--authorisation-date=")) authorisationDate = argument.slice("--authorisation-date=".length);
+    else if (argument.startsWith("--authorisation-date="))
+      authorisationDate = argument.slice("--authorisation-date=".length);
     else if (argument === "--authorisation") authorisationQuote = values[++index];
-    else if (argument.startsWith("--authorisation=")) authorisationQuote = argument.slice("--authorisation=".length);
+    else if (argument.startsWith("--authorisation="))
+      authorisationQuote = argument.slice("--authorisation=".length);
     // Repeatable and per-member on purpose: see `ReleaseOptions.allowNonDefaultBranchFor`.
     else if (argument === "--allow-branch") allowNonDefaultBranchFor.push(values[++index] ?? "");
-    else if (argument.startsWith("--allow-branch=")) allowNonDefaultBranchFor.push(argument.slice("--allow-branch=".length));
+    else if (argument.startsWith("--allow-branch="))
+      allowNonDefaultBranchFor.push(argument.slice("--allow-branch=".length));
     else if (argument === "--skip-strictness") {
       sawSkipStrictnessFlag = true;
       skipStrictness = values[++index] ?? "";
@@ -2851,7 +3009,9 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
   // reported by `assertMatrixScopeIsStated` naming the missing piece, rather
   // than silently becoming "no authorisation" and producing the wrong refusal.
   const matrixAuthorisation =
-    authorisedBy !== undefined || authorisationDate !== undefined || authorisationQuote !== undefined
+    authorisedBy !== undefined ||
+    authorisationDate !== undefined ||
+    authorisationQuote !== undefined
       ? {
           authorisedBy: authorisedBy ?? "",
           date: authorisationDate ?? "",
@@ -2867,7 +3027,8 @@ export function parseArguments(argv: readonly string[]): ReleaseOptions {
     matrixScope,
     only,
     matrixAuthorisation,
-    allowNonDefaultBranchFor: allowNonDefaultBranchFor.length > 0 ? allowNonDefaultBranchFor : undefined,
+    allowNonDefaultBranchFor:
+      allowNonDefaultBranchFor.length > 0 ? allowNonDefaultBranchFor : undefined,
     skipStrictness,
   };
 }
@@ -2880,8 +3041,8 @@ function parseMatrixScope(raw: string | undefined): MatrixScope {
 function parseOnlyArgument(raw: string | undefined): string[] {
   const names = (raw ?? "")
     .split(",")
-    .map(name => name.trim())
-    .filter(name => name.length > 0);
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
   if (names.length === 0) {
     throw new Error("--only requires at least one feature name (comma-separated).");
   }
@@ -2894,7 +3055,7 @@ async function main(): Promise<void> {
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
 if (import.meta.url === invokedPath) {
-  main().catch(error => {
+  main().catch((error) => {
     console.error(formatError(error));
     process.exitCode = 1;
   });

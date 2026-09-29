@@ -285,6 +285,10 @@ export default defineConfig({
             // build entries and `exports` entries to remain importable at all.
             "tests/index.ts",
             "vite/index.ts",
+            // The build-time route registration collector runs in an isolated
+            // Node child. It is a separate entry because the parent resolves
+            // the compiled child by a runtime path rather than importing it.
+            "production/route-registration-child.ts",
             "dev-server/health-checker/workers/eslint-health.worker.ts",
             "dev-server/health-checker/workers/ts-health.worker.ts",
             "dev-server/loader/hook-thread.ts",
@@ -536,6 +540,26 @@ export default defineConfig({
             "README.md",
             "LICENSE",
             "CHANGELOG.md",
+            "skills",
+            "llms.txt",
+            "llms-full.txt",
+          ],
+        },
+        {
+          /**
+           * Development-only dashboard at `/__warlock`, new in 5.25. Installed
+           * as a devDependency (`warlock add devtools`). `ui` is cloned, not
+           * bundled: the static dashboard is served from files, and
+           * `resolveUiRoot()` walks up from the built module to find it.
+           */
+          name: "@warlock.js/devtools",
+          root: "../devtools",
+          entries: ["index.ts"],
+          clone: [
+            "README.md",
+            "LICENSE",
+            "CHANGELOG.md",
+            "ui",
             "skills",
             "llms.txt",
             "llms-full.txt",

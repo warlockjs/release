@@ -77,9 +77,7 @@ describe("command failure output", () => {
   });
 });
 
-function fixture(
-  overrides: Partial<ReleaseFamilyDependencies> = {},
-): {
+function fixture(overrides: Partial<ReleaseFamilyDependencies> = {}): {
   dependencies: ReleaseFamilyDependencies;
   commands: CommandRequest[];
   handoffs: ReleaseHandoff[];
@@ -95,7 +93,7 @@ function fixture(
     removeDirectory: async () => undefined,
     removeFile: async () => undefined,
     writeTextFile: async () => undefined,
-    readTextFile: async filePath => {
+    readTextFile: async (filePath) => {
       // Default innocent-case package.json: both own-quality scripts declared.
       if (path.basename(filePath) === "package.json") {
         return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
@@ -103,6 +101,7 @@ function fixture(
       if (path.basename(filePath) === "pnpm-lock.yaml") {
         return "lockfileVersion: '9.0'\n";
       }
+
       throw new Error(`fixture readTextFile has no stub for ${filePath}`);
     },
     resolvePkgistCli: () => path.resolve("pkgist", "dist", "cli.js"),
@@ -119,9 +118,13 @@ function fixture(
       command: "resolved-node",
       args: [memberRoot, scriptCommand],
     }),
-    runCommand: async request => {
+    runCommand: async (request) => {
       commands.push(request);
-      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] === "--abbrev-ref") {
+      if (
+        request.command === "git" &&
+        request.args[0] === "rev-parse" &&
+        request.args[1] === "--abbrev-ref"
+      ) {
         // Innocent case: every member is checked out on the same branch
         // origin's default resolves to below.
         return { stdout: "main\n", stderr: "" };
@@ -129,7 +132,11 @@ function fixture(
       if (request.command === "git" && request.args[0] === "rev-parse") {
         return { stdout: `${"a".repeat(40)}\n`, stderr: "" };
       }
-      if (request.command === "git" && request.args[0] === "ls-remote" && request.args[1] === "--symref") {
+      if (
+        request.command === "git" &&
+        request.args[0] === "ls-remote" &&
+        request.args[1] === "--symref"
+      ) {
         return { stdout: `ref: refs/heads/main\tHEAD\n${"a".repeat(40)}\tHEAD\n`, stderr: "" };
       }
       if (request.args[1] === "pack") {
@@ -144,7 +151,7 @@ function fixture(
       }
       return { stdout: "", stderr: "" };
     },
-    inspectArtifact: async filePath => {
+    inspectArtifact: async (filePath) => {
       const name = filePath.includes("create-warlock")
         ? "create-warlock"
         : "@warlock.js/notifications";
@@ -174,11 +181,11 @@ function fixture(
       };
     },
     sha256File: async () => HASH,
-    runLocalGate: async input => {
+    runLocalGate: async (input) => {
       const result: PublishHandoff = {
         kind: "warlock-family-publish-handoff",
         candidateVersion: input.candidateVersion,
-        artifacts: input.artifacts.map(artifact => ({ ...artifact })),
+        artifacts: input.artifacts.map((artifact) => ({ ...artifact })),
         verifiedAt: "2026-09-02T12:00:00.000Z",
       };
       gateInputs.push(result);
@@ -207,7 +214,7 @@ describe("runReleaseFamily gate mode", () => {
       loadFamily: async () => ({
         ...FAMILY,
         version: "5.2.4",
-        members: FAMILY.members.map(member => ({ ...member, version: "5.2.4" })),
+        members: FAMILY.members.map((member) => ({ ...member, version: "5.2.4" })),
       }),
     });
 
@@ -227,11 +234,14 @@ describe("runReleaseFamily gate mode", () => {
     );
 
     assert.ok(handoff);
-    assert.deepEqual(handoff.subjects, FAMILY.members.map(member => member.name));
+    assert.deepEqual(
+      handoff.subjects,
+      FAMILY.members.map((member) => member.name),
+    );
     assert.equal(control.gateInputs.length, 1);
     assert.deepEqual(control.handoffs, [handoff]);
 
-    const builds = control.commands.filter(command => command.args[1] === "build");
+    const builds = control.commands.filter((command) => command.args[1] === "build");
     assert.equal(builds.length, FAMILY.members.length);
     for (const [index, build] of builds.entries()) {
       assert.deepEqual(build.args.slice(1, 7), [
@@ -244,7 +254,7 @@ describe("runReleaseFamily gate mode", () => {
       ]);
     }
     assert.equal(
-      control.commands.filter(command => command.args[1] === "pack").length,
+      control.commands.filter((command) => command.args[1] === "pack").length,
       FAMILY.members.length,
     );
   });
@@ -263,9 +273,7 @@ describe("runReleaseFamily gate mode", () => {
 
     assert.equal(control.handoffs.length, 0);
     const originPublishes = control.commands.filter(
-      command =>
-        command.args[1] === "publish" &&
-        command.args.includes(NPM_ORIGIN),
+      (command) => command.args[1] === "publish" && command.args.includes(NPM_ORIGIN),
     );
     assert.equal(originPublishes.length, 0);
   });
@@ -277,9 +285,9 @@ describe("runReleaseFamily gate mode", () => {
       "package/esm/index.mjs",
       "package/esm/index.d.mts",
     ];
-    let artifactEntries = validEntries.filter(entry => entry !== "package/esm/index.mjs");
+    let artifactEntries = validEntries.filter((entry) => entry !== "package/esm/index.mjs");
     const control = fixture({
-      inspectArtifact: async filePath => ({
+      inspectArtifact: async (filePath) => ({
         manifest: {
           name: filePath.includes("create-warlock")
             ? "create-warlock"
@@ -290,12 +298,12 @@ describe("runReleaseFamily gate mode", () => {
         },
         entries: artifactEntries,
       }),
-      runLocalGate: async input => {
+      runLocalGate: async (input) => {
         localGateCalls += 1;
         return {
           kind: "warlock-family-publish-handoff",
           candidateVersion: input.candidateVersion,
-          artifacts: input.artifacts.map(artifact => ({ ...artifact })),
+          artifacts: input.artifacts.map((artifact) => ({ ...artifact })),
           verifiedAt: "2026-09-02T12:00:00.000Z",
         };
       },
@@ -307,10 +315,7 @@ describe("runReleaseFamily gate mode", () => {
     );
     assert.equal(localGateCalls, 0);
     assert.equal(control.handoffs.length, 0);
-    assert.equal(
-      control.commands.filter(command => command.args[1] === "publish").length,
-      0,
-    );
+    assert.equal(control.commands.filter((command) => command.args[1] === "publish").length, 0);
 
     // Restore the exact deleted entry. The same release path must now reach the
     // local gate, proving the red result came from the shared packed-entry check.
@@ -332,7 +337,7 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
   function withGitStatus(dirtyByRoot: ReadonlyMap<string, string>): ReturnType<typeof fixture> {
     const control = fixture();
     const baseRunCommand = control.dependencies.runCommand!;
-    control.dependencies.runCommand = async request => {
+    control.dependencies.runCommand = async (request) => {
       if (request.command === "git" && request.args[0] === "status") {
         control.commands.push(request);
         const stdout = dirtyByRoot.get(request.cwd) ?? "";
@@ -347,58 +352,68 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
 
   it("INNOCENT CASE: a clean workspace gates green and packs every member, exactly as today", async () => {
     const control = withGitStatus(new Map());
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
 
     assert.ok(handoff);
-    const builds = control.commands.filter(command => command.args[1] === "build");
-    const packs = control.commands.filter(command => command.args[1] === "pack");
+    const builds = control.commands.filter((command) => command.args[1] === "build");
+    const packs = control.commands.filter((command) => command.args[1] === "pack");
     assert.equal(builds.length, FAMILY.members.length);
     assert.equal(packs.length, FAMILY.members.length);
   });
 
-  it("RED CONTROL (two-sided): dirtying ONE package's published surface refuses only that " +
-    "package while the other still builds and packs; reverting passes green again", async () => {
-    const dirty = new Map([
-      [notificationsRoot, " M src/index.ts\n"], // inside published surface (srcDir defaults to "src")
-    ]);
-    const control = withGitStatus(dirty);
+  it(
+    "RED CONTROL (two-sided): dirtying ONE package's published surface refuses only that " +
+      "package while the other still builds and packs; reverting passes green again",
+    async () => {
+      const dirty = new Map([
+        [notificationsRoot, " M src/index.ts\n"], // inside published surface (srcDir defaults to "src")
+      ]);
+      const control = withGitStatus(dirty);
 
-    await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
-      error => {
-        const message = (error as Error).message;
-        assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
-        assert.match(message, /src\/index\.ts/);
-        return true;
-      },
-    );
+      await assert.rejects(
+        runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+        (error) => {
+          const message = (error as Error).message;
+          assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
+          assert.match(message, /src\/index\.ts/);
+          return true;
+        },
+      );
 
-    // Half one: the dirty package was never built or packed.
-    const notificationsBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
-    );
-    assert.equal(notificationsBuilds.length, 0, "dirty member must not be built");
+      // Half one: the dirty package was never built or packed.
+      const notificationsBuilds = control.commands.filter(
+        (command) => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+      );
+      assert.equal(notificationsBuilds.length, 0, "dirty member must not be built");
 
-    // Half two — the assertion the card says is rejected without: the OTHER
-    // 27 (here, the one other fixture member) still built and packed.
-    const createWarlockBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "create-warlock",
-    );
-    const createWarlockPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
-    );
-    assert.equal(createWarlockBuilds.length, 1, "clean member must still build");
-    assert.equal(createWarlockPacks.length, 1, "clean member must still pack");
+      // Half two — the assertion the card says is rejected without: the OTHER
+      // 27 (here, the one other fixture member) still built and packed.
+      const createWarlockBuilds = control.commands.filter(
+        (command) => command.args[1] === "build" && command.args[2] === "create-warlock",
+      );
+      const createWarlockPacks = control.commands.filter(
+        (command) =>
+          command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      );
+      assert.equal(createWarlockBuilds.length, 1, "clean member must still build");
+      assert.equal(createWarlockPacks.length, 1, "clean member must still pack");
 
-    // No handoff was ever produced for the refused candidate version.
-    assert.equal(control.handoffs.length, 0);
+      // No handoff was ever produced for the refused candidate version.
+      assert.equal(control.handoffs.length, 0);
 
-    // Revert: an all-clean tree for the same two members passes green again.
-    const cleanControl = withGitStatus(new Map());
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
-    assert.ok(handoff);
-    assert.equal(cleanControl.handoffs.length, 1);
-  });
+      // Revert: an all-clean tree for the same two members passes green again.
+      const cleanControl = withGitStatus(new Map());
+      const handoff = await runReleaseFamily(
+        { mode: "gate", version: VERSION, ...FULL_MATRIX },
+        cleanControl.dependencies,
+      );
+      assert.ok(handoff);
+      assert.equal(cleanControl.handoffs.length, 1);
+    },
+  );
 
   it("a dirty file OUTSIDE the published surface does not refuse, and logs an explicit waiver", async () => {
     const dirty = new Map([
@@ -414,14 +429,20 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+      const handoff = await runReleaseFamily(
+        { mode: "gate", version: VERSION, ...FULL_MATRIX },
+        control.dependencies,
+      );
       assert.ok(handoff, "a surface-external dirty file must not block the release");
     } finally {
       console.warn = originalWarn;
     }
 
-    const waiverLine = warnings.find(line => line.includes("WAIVED"));
-    assert.ok(waiverLine, "an explicit waiver line must be logged for the surface-external dirty file");
+    const waiverLine = warnings.find((line) => line.includes("WAIVED"));
+    assert.ok(
+      waiverLine,
+      "an explicit waiver line must be logged for the surface-external dirty file",
+    );
     assert.match(waiverLine!, /@warlock\.js\/notifications/);
     assert.match(waiverLine!, /tests\/fixtures\/new-fixture\.ts/);
   });
@@ -447,22 +468,27 @@ describe("per-package own quality gate (test/typecheck)", () => {
 
   function withPackageScripts(
     scriptsByRoot: ReadonlyMap<string, Record<string, string>>,
-    runScriptResult: (request: CommandRequest) => { stdout: string; stderr: string } | Error = () => ({
+    runScriptResult: (
+      request: CommandRequest,
+    ) => { stdout: string; stderr: string } | Error = () => ({
       stdout: "",
       stderr: "",
     }),
   ): ReturnType<typeof fixture> {
     const control = fixture(resolvingDependencies());
     const baseRunCommand = control.dependencies.runCommand!;
-    control.dependencies.readTextFile = async filePath => {
+    control.dependencies.readTextFile = async (filePath) => {
       if (path.basename(filePath) === "package.json") {
         const root = path.dirname(filePath);
-        const scripts = scriptsByRoot.get(root) ?? { test: "vitest run", typecheck: "tsc --noEmit" };
+        const scripts = scriptsByRoot.get(root) ?? {
+          test: "vitest run",
+          typecheck: "tsc --noEmit",
+        };
         return JSON.stringify({ scripts });
       }
       throw new Error(`unexpected readTextFile ${filePath}`);
     };
-    control.dependencies.runCommand = async request => {
+    control.dependencies.runCommand = async (request) => {
       if (request.command === RESOLVED_MARKER) {
         control.commands.push(request);
         const outcome = runScriptResult(request);
@@ -474,91 +500,104 @@ describe("per-package own quality gate (test/typecheck)", () => {
     return control;
   }
 
-  it("INNOCENT CASE: every member declares green test/typecheck scripts and the gate " +
-    "passes and behaves as it does today", async () => {
-    // Pollute the ambient environment the way the real machine does, to
-    // prove the child env is scrubbed rather than merely usually-absent.
-    const previousHttpPort = process.env.HTTP_PORT;
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.HTTP_PORT = "4000";
-    process.env.NODE_ENV = "production";
-    try {
-      const control = withPackageScripts(new Map());
-      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
-
-      assert.ok(handoff);
-      const runs = control.commands.filter(command => command.command === RESOLVED_MARKER);
-      // Both fixture members × both scripts (test, typecheck).
-      assert.equal(runs.length, FAMILY.members.length * 2);
-      // Never shelled through npm/npx: each run's command is the resolved
-      // binary marker, never "npm" or an args[1] of "run".
-      assert.ok(runs.every(run => run.command === RESOLVED_MARKER));
-      // HTTP_PORT and NODE_ENV are cleared from every quality-check child env.
-      assert.ok(runs.every(run => !("HTTP_PORT" in run.env)));
-      assert.ok(runs.every(run => !("NODE_ENV" in run.env)));
-
-      const builds = control.commands.filter(command => command.args[1] === "build");
-      const packs = control.commands.filter(command => command.args[1] === "pack");
-      assert.equal(builds.length, FAMILY.members.length);
-      assert.equal(packs.length, FAMILY.members.length);
-    } finally {
-      if (previousHttpPort === undefined) delete process.env.HTTP_PORT;
-      else process.env.HTTP_PORT = previousHttpPort;
-      if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
-      else process.env.NODE_ENV = previousNodeEnv;
-    }
-  });
-
-  it("RED CONTROL (two-sided): breaking ONE package's test suite refuses only that package " +
-    "while the other still builds and packs; restoring passes green again", async () => {
-    const control = withPackageScripts(new Map(), request => {
-      // args[1] carries the resolved script's original command text ("vitest run").
-      if (request.cwd === notificationsRoot && request.args[1] === "vitest run") {
-        return new Error(
-          `${process.execPath} exited 1: FAIL src/index.spec.ts > it explodes\nAssertionError`,
+  it(
+    "INNOCENT CASE: every member declares green test/typecheck scripts and the gate " +
+      "passes and behaves as it does today",
+    async () => {
+      // Pollute the ambient environment the way the real machine does, to
+      // prove the child env is scrubbed rather than merely usually-absent.
+      const previousHttpPort = process.env.HTTP_PORT;
+      const previousNodeEnv = process.env.NODE_ENV;
+      process.env.HTTP_PORT = "4000";
+      process.env.NODE_ENV = "production";
+      try {
+        const control = withPackageScripts(new Map());
+        const handoff = await runReleaseFamily(
+          { mode: "gate", version: VERSION, ...FULL_MATRIX },
+          control.dependencies,
         );
+
+        assert.ok(handoff);
+        const runs = control.commands.filter((command) => command.command === RESOLVED_MARKER);
+        // Both fixture members × both scripts (test, typecheck).
+        assert.equal(runs.length, FAMILY.members.length * 2);
+        // Never shelled through npm/npx: each run's command is the resolved
+        // binary marker, never "npm" or an args[1] of "run".
+        assert.ok(runs.every((run) => run.command === RESOLVED_MARKER));
+        // HTTP_PORT and NODE_ENV are cleared from every quality-check child env.
+        assert.ok(runs.every((run) => !("HTTP_PORT" in run.env)));
+        assert.ok(runs.every((run) => !("NODE_ENV" in run.env)));
+
+        const builds = control.commands.filter((command) => command.args[1] === "build");
+        const packs = control.commands.filter((command) => command.args[1] === "pack");
+        assert.equal(builds.length, FAMILY.members.length);
+        assert.equal(packs.length, FAMILY.members.length);
+      } finally {
+        if (previousHttpPort === undefined) delete process.env.HTTP_PORT;
+        else process.env.HTTP_PORT = previousHttpPort;
+        if (previousNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = previousNodeEnv;
       }
-      return { stdout: "", stderr: "" };
-    });
+    },
+  );
 
-    await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
-      error => {
-        const message = (error as Error).message;
-        assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
-        assert.match(message, /its own quality gate is red/);
-        assert.match(message, new RegExp(`"test" \\(${RESOLVED_MARKER} `));
-        return true;
-      },
-    );
+  it(
+    "RED CONTROL (two-sided): breaking ONE package's test suite refuses only that package " +
+      "while the other still builds and packs; restoring passes green again",
+    async () => {
+      const control = withPackageScripts(new Map(), (request) => {
+        // args[1] carries the resolved script's original command text ("vitest run").
+        if (request.cwd === notificationsRoot && request.args[1] === "vitest run") {
+          return new Error(
+            `${process.execPath} exited 1: FAIL src/index.spec.ts > it explodes\nAssertionError`,
+          );
+        }
+        return { stdout: "", stderr: "" };
+      });
 
-    // Half one: the red member was never built or packed.
-    const notificationsBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
-    );
-    assert.equal(notificationsBuilds.length, 0, "red member must not be built");
+      await assert.rejects(
+        runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+        (error) => {
+          const message = (error as Error).message;
+          assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
+          assert.match(message, /its own quality gate is red/);
+          assert.match(message, new RegExp(`"test" \\(${RESOLVED_MARKER} `));
+          return true;
+        },
+      );
 
-    // Half two — the assertion that matters: the OTHER 27 (here, the one
-    // other fixture member) still built and packed despite the red sibling.
-    const createWarlockBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "create-warlock",
-    );
-    const createWarlockPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
-    );
-    assert.equal(createWarlockBuilds.length, 1, "clean sibling must still build");
-    assert.equal(createWarlockPacks.length, 1, "clean sibling must still pack");
-    assert.equal(control.handoffs.length, 0);
+      // Half one: the red member was never built or packed.
+      const notificationsBuilds = control.commands.filter(
+        (command) => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+      );
+      assert.equal(notificationsBuilds.length, 0, "red member must not be built");
 
-    // Restore: an all-green set of scripts for the same two members passes
-    // green again.
-    const cleanControl = withPackageScripts(new Map());
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
-    assert.ok(handoff);
-    assert.equal(cleanControl.handoffs.length, 1);
-  });
+      // Half two — the assertion that matters: the OTHER 27 (here, the one
+      // other fixture member) still built and packed despite the red sibling.
+      const createWarlockBuilds = control.commands.filter(
+        (command) => command.args[1] === "build" && command.args[2] === "create-warlock",
+      );
+      const createWarlockPacks = control.commands.filter(
+        (command) =>
+          command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      );
+      assert.equal(createWarlockBuilds.length, 1, "clean sibling must still build");
+      assert.equal(createWarlockPacks.length, 1, "clean sibling must still pack");
+      assert.equal(control.handoffs.length, 0);
 
-  it("a package with no \"test\" script produces a reported-skip line and does NOT refuse", async () => {
+      // Restore: an all-green set of scripts for the same two members passes
+      // green again.
+      const cleanControl = withPackageScripts(new Map());
+      const handoff = await runReleaseFamily(
+        { mode: "gate", version: VERSION, ...FULL_MATRIX },
+        cleanControl.dependencies,
+      );
+      assert.ok(handoff);
+      assert.equal(cleanControl.handoffs.length, 1);
+    },
+  );
+
+  it('a package with no "test" script produces a reported-skip line and does NOT refuse', async () => {
     const control = withPackageScripts(
       new Map([[notificationsRoot, { typecheck: "tsc --noEmit" }]]),
     );
@@ -569,51 +608,60 @@ describe("per-package own quality gate (test/typecheck)", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+      const handoff = await runReleaseFamily(
+        { mode: "gate", version: VERSION, ...FULL_MATRIX },
+        control.dependencies,
+      );
       assert.ok(handoff, "a missing test script must not block the release");
     } finally {
       console.warn = originalWarn;
     }
 
-    const skipLine = warnings.find(line => line.includes("SKIPPED"));
+    const skipLine = warnings.find((line) => line.includes("SKIPPED"));
     assert.ok(skipLine, "a reported-skip line must be logged for the missing script");
     assert.match(skipLine!, /@warlock\.js\/notifications/);
     assert.match(skipLine!, /no "test" script/);
 
     // Only "typecheck" ran for the skipped member; "test" never did.
     const notificationsRuns = control.commands.filter(
-      command => command.command === RESOLVED_MARKER && command.cwd === notificationsRoot,
+      (command) => command.command === RESOLVED_MARKER && command.cwd === notificationsRoot,
     );
-    assert.deepEqual(notificationsRuns.map(command => command.args[1]), ["tsc --noEmit"]);
+    assert.deepEqual(
+      notificationsRuns.map((command) => command.args[1]),
+      ["tsc --noEmit"],
+    );
   });
 
-  it("cannot resolve a script's binary: reported as a refusal for that package, never a " +
-    "silent pass and never a shelled npx fallback", async () => {
-    const control = fixture({
-      readTextFile: async filePath => {
-        if (path.basename(filePath) === "package.json") {
-          return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
-        }
-        throw new Error(`unexpected readTextFile ${filePath}`);
-      },
-      resolvePackageScript: () => {
-        throw new Error("no node_modules/.bin/vitest found");
-      },
-    });
+  it(
+    "cannot resolve a script's binary: reported as a refusal for that package, never a " +
+      "silent pass and never a shelled npx fallback",
+    async () => {
+      const control = fixture({
+        readTextFile: async (filePath) => {
+          if (path.basename(filePath) === "package.json") {
+            return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
+          }
+          throw new Error(`unexpected readTextFile ${filePath}`);
+        },
+        resolvePackageScript: () => {
+          throw new Error("no node_modules/.bin/vitest found");
+        },
+      });
 
-    await assert.rejects(
-      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
-      error => {
-        const message = (error as Error).message;
-        assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
-        assert.match(message, /resolving "vitest run"/);
-        assert.match(message, /no node_modules\/\.bin\/vitest found/);
-        return true;
-      },
-    );
-    const runCommands = control.commands.filter(command => command.args[1] === "run");
-    assert.equal(runCommands.length, 0, "must never fall back to shelling `npm run`/`npx`");
-  });
+      await assert.rejects(
+        runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+        (error) => {
+          const message = (error as Error).message;
+          assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
+          assert.match(message, /resolving "vitest run"/);
+          assert.match(message, /no node_modules\/\.bin\/vitest found/);
+          return true;
+        },
+      );
+      const runCommands = control.commands.filter((command) => command.args[1] === "run");
+      assert.equal(runCommands.length, 0, "must never fall back to shelling `npm run`/`npx`");
+    },
+  );
 });
 
 describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)", () => {
@@ -634,23 +682,29 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
     const removedDirectories: string[] = [];
     const control = fixture({
       // Only create-warlock carries a lockfile.
-      fileExists: async filePath => (path.basename(filePath) === "pnpm-lock.yaml"
-        && path.dirname(filePath) === createWarlockRoot)
-        || (outcomes.hasWorkspacePolicy === true
-          && path.basename(filePath) === "pnpm-workspace.yaml"
-          && path.dirname(filePath) === createWarlockRoot),
-      readTextFile: async filePath => {
+      fileExists: async (filePath) =>
+        (path.basename(filePath) === "pnpm-lock.yaml" &&
+          path.dirname(filePath) === createWarlockRoot) ||
+        (outcomes.hasWorkspacePolicy === true &&
+          path.basename(filePath) === "pnpm-workspace.yaml" &&
+          path.dirname(filePath) === createWarlockRoot),
+      readTextFile: async (filePath) => {
         if (path.basename(filePath) === "pnpm-workspace.yaml") {
           return "minimumReleaseAgeExclude:\n  - '@mongez/*'\n";
         }
+
         if (path.basename(filePath) === "package.json") {
           return JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } });
         }
-        if (path.basename(filePath) === "pnpm-lock.yaml") return "lockfileVersion: '9.0'\n";
+
+        if (path.basename(filePath) === "pnpm-lock.yaml") {
+          return "lockfileVersion: '9.0'\n";
+        }
+
         throw new Error(`fixture readTextFile has no stub for ${filePath}`);
       },
       makeTemporaryDirectory: async () => stagingRoot,
-      removeDirectory: async directory => {
+      removeDirectory: async (directory) => {
         removedDirectories.push(directory);
       },
       writeTextFile: async (filePath, contents) => {
@@ -658,7 +712,7 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
       },
     });
     const baseRunCommand = control.dependencies.runCommand!;
-    control.dependencies.runCommand = async request => {
+    control.dependencies.runCommand = async (request) => {
       if (request.args[0] === PNPM_MARKER && request.args[1] === "install") {
         control.commands.push(request);
         const isFrozen = request.args.includes("--frozen-lockfile");
@@ -675,25 +729,30 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
 
   function lockfileCommandsFor(control: ReturnType<typeof lockfileFixture>): CommandRequest[] {
     return control.commands.filter(
-      command => command.args[0] === PNPM_MARKER && command.cwd === control.stagingRoot,
+      (command) => command.args[0] === PNPM_MARKER && command.cwd === control.stagingRoot,
     );
   }
 
   it("a member WITH a lockfile gets regenerated then frozen-lockfile-checked, after its build and before its pack", async () => {
     const control = lockfileFixture({ hasWorkspacePolicy: true });
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff);
 
     const cwCommands = control.commands.filter(
-      command =>
+      (command) =>
         (command.args[1] === "build" && command.args[2] === "create-warlock") ||
         command.args[0] === PNPM_MARKER ||
         (command.args[1] === "pack" && String(command.args[2]).includes("create-warlock")),
     );
-    const orderedKinds = cwCommands.map(command => {
+    const orderedKinds = cwCommands.map((command) => {
       if (command.args[1] === "build") return "build";
-      if (command.args[0] === PNPM_MARKER && command.args.includes("--lockfile-only")) return "lockfile-only";
-      if (command.args[0] === PNPM_MARKER && command.args.includes("--frozen-lockfile")) return "frozen-lockfile";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--lockfile-only"))
+        return "lockfile-only";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--frozen-lockfile"))
+        return "frozen-lockfile";
       if (command.args[1] === "pack") return "pack";
       return "other";
     });
@@ -702,15 +761,17 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
 
     const pnpmCommands = lockfileCommandsFor(control);
     assert.equal(pnpmCommands.length, 2);
-    assert.ok(pnpmCommands.every(command => command.command === process.execPath));
-    assert.ok(pnpmCommands.every(command => command.args[0] === PNPM_MARKER));
-    assert.ok(pnpmCommands.every(command => command.cwd !== createWarlockRoot));
+    assert.ok(pnpmCommands.every((command) => command.command === process.execPath));
+    assert.ok(pnpmCommands.every((command) => command.args[0] === PNPM_MARKER));
+    assert.ok(pnpmCommands.every((command) => command.cwd !== createWarlockRoot));
     assert.ok(
-      pnpmCommands.every(command => !command.args.includes("--ignore-workspace")),
+      pnpmCommands.every((command) => !command.args.includes("--ignore-workspace")),
       "the isolated member policy must remain active",
     );
-    assert.ok(pnpmCommands.every(command => command.args.includes("--ignore-scripts")));
-    assert.ok(pnpmCommands.every(command => !command.cwd.startsWith(path.dirname(createWarlockRoot))));
+    assert.ok(pnpmCommands.every((command) => command.args.includes("--ignore-scripts")));
+    assert.ok(
+      pnpmCommands.every((command) => !command.cwd.startsWith(path.dirname(createWarlockRoot))),
+    );
     assert.deepEqual(control.removedDirectories, [control.stagingRoot]);
     assert.deepEqual(
       control.writes.slice(0, 3),
@@ -719,7 +780,10 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
           filePath: path.join(control.stagingRoot, "package.json"),
           contents: JSON.stringify({ scripts: { test: "vitest run", typecheck: "tsc --noEmit" } }),
         },
-        { filePath: path.join(control.stagingRoot, "pnpm-lock.yaml"), contents: "lockfileVersion: '9.0'\n" },
+        {
+          filePath: path.join(control.stagingRoot, "pnpm-lock.yaml"),
+          contents: "lockfileVersion: '9.0'\n",
+        },
         {
           filePath: path.join(control.stagingRoot, "pnpm-workspace.yaml"),
           contents: "minimumReleaseAgeExclude:\n  - '@mongez/*'\n",
@@ -728,39 +792,57 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
       "the member manifest, old lockfile, and existing policy must be copied into the isolated staging directory",
     );
     assert.deepEqual(
-      control.writes.filter(write => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml")),
-      [{ filePath: path.join(createWarlockRoot, "pnpm-lock.yaml"), contents: "lockfileVersion: '9.0'\n" }],
+      control.writes.filter(
+        (write) => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml"),
+      ),
+      [
+        {
+          filePath: path.join(createWarlockRoot, "pnpm-lock.yaml"),
+          contents: "lockfileVersion: '9.0'\n",
+        },
+      ],
       "only the validated staged lockfile may be copied into the member",
     );
     // Never through npx/pnpm exec.
-    assert.ok(control.commands.every(command => command.command !== "npx"));
-    assert.ok(control.commands.every(command => !command.args.includes("exec")));
+    assert.ok(control.commands.every((command) => command.command !== "npx"));
+    assert.ok(control.commands.every((command) => !command.args.includes("exec")));
   });
 
   it("does not synthesize a pnpm workspace policy when the member has none", async () => {
     const control = lockfileFixture();
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
+
     assert.ok(handoff);
     assert.equal(
-      control.writes.filter(write => write.filePath === path.join(control.stagingRoot, "pnpm-workspace.yaml")).length,
+      control.writes.filter(
+        (write) => write.filePath === path.join(control.stagingRoot, "pnpm-workspace.yaml"),
+      ).length,
       0,
     );
   });
 
   it("a member WITHOUT a lockfile gets neither regeneration nor the frozen-lockfile check, and is otherwise untouched", async () => {
     const control = lockfileFixture();
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff);
 
     assert.equal(
-      control.commands.filter(command => command.args[0] === PNPM_MARKER && command.cwd === notificationsRoot).length,
+      control.commands.filter(
+        (command) => command.args[0] === PNPM_MARKER && command.cwd === notificationsRoot,
+      ).length,
       0,
     );
     const notifBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+      (command) => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
     );
     const notifPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
     );
     assert.equal(notifBuilds.length, 1);
     assert.equal(notifPacks.length, 1);
@@ -777,7 +859,7 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
 
     await assert.rejects(
       runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
-      error => {
+      (error) => {
         const message = (error as Error).message;
         assert.match(message, /Refusing to pack create-warlock/);
         assert.match(message, /regenerated lockfile does not agree with its rewritten manifest/);
@@ -788,11 +870,13 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
 
     // The failing member was never packed.
     const cwPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
     );
     assert.equal(cwPacks.length, 0, "member whose lockfile disagrees must not be packed");
     assert.deepEqual(
-      control.writes.filter(write => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml")),
+      control.writes.filter(
+        (write) => write.filePath === path.join(createWarlockRoot, "pnpm-lock.yaml"),
+      ),
       [],
       "a lockfile that fails frozen validation must never be copied back to the member",
     );
@@ -800,17 +884,20 @@ describe("per-member lockfile regeneration (the create-warlock / 5.6.0 defect)",
 
     // The other, unaffected member still built and packed.
     const notifBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+      (command) => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
     );
     const notifPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
     );
     assert.equal(notifBuilds.length, 1, "unaffected sibling must still build");
     assert.equal(notifPacks.length, 1, "unaffected sibling must still pack");
 
     // Restore: an agreeing lockfile passes green again.
     const cleanControl = lockfileFixture();
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      cleanControl.dependencies,
+    );
     assert.ok(handoff);
   });
 });
@@ -831,13 +918,18 @@ describe("per-member release commit (card D1a)", () => {
   ): ReturnType<typeof fixture> {
     const control = fixture({
       // Only create-warlock carries a lockfile.
-      fileExists: async filePath => path.basename(filePath) === "pnpm-lock.yaml"
-        && path.dirname(filePath) === createWarlockRoot,
+      fileExists: async (filePath) =>
+        path.basename(filePath) === "pnpm-lock.yaml" &&
+        path.dirname(filePath) === createWarlockRoot,
     });
     const baseRunCommand = control.dependencies.runCommand!;
     const revCounts = new Map<string, number>();
-    control.dependencies.runCommand = async request => {
-      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] !== "--abbrev-ref") {
+    control.dependencies.runCommand = async (request) => {
+      if (
+        request.command === "git" &&
+        request.args[0] === "rev-parse" &&
+        request.args[1] !== "--abbrev-ref"
+      ) {
         control.commands.push(request);
         const count = (revCounts.get(request.cwd) ?? 0) + 1;
         revCounts.set(request.cwd, count);
@@ -847,7 +939,10 @@ describe("per-member release commit (card D1a)", () => {
         const sha = count === 1 ? "a".repeat(40) : "b".repeat(40);
         return { stdout: `${sha}\n`, stderr: "" };
       }
-      if (request.command === "git" && (request.args[0] === "add" || request.args[0] === "commit")) {
+      if (
+        request.command === "git" &&
+        (request.args[0] === "add" || request.args[0] === "commit")
+      ) {
         control.commands.push(request);
         const outcome = outcomes.commit?.(request) ?? { stdout: "", stderr: "" };
         if (outcome instanceof Error) throw outcome;
@@ -858,12 +953,22 @@ describe("per-member release commit (card D1a)", () => {
         const stdout = outcomes.gitStatus?.get(request.cwd) ?? "";
         return { stdout, stderr: "" };
       }
-      if (request.command === "git" && request.args[0] === "diff" && request.args.includes("--cached")) {
+      if (
+        request.command === "git" &&
+        request.args[0] === "diff" &&
+        request.args.includes("--cached")
+      ) {
         control.commands.push(request);
         const separator = request.args.indexOf("--");
         const paths = separator === -1 ? [] : request.args.slice(separator + 1);
-        const stdout = outcomes.staged?.(request) ?? paths.map(entry => `${entry}
-`).join("");
+        const stdout =
+          outcomes.staged?.(request) ??
+          paths
+            .map(
+              (entry) => `${entry}
+`,
+            )
+            .join("");
         return { stdout, stderr: "" };
       }
       return await baseRunCommand(request);
@@ -872,16 +977,19 @@ describe("per-member release commit (card D1a)", () => {
   }
 
   function gitCommandsFor(control: ReturnType<typeof fixture>, root: string): CommandRequest[] {
-    return control.commands.filter(command => command.command === "git" && command.cwd === root);
+    return control.commands.filter((command) => command.command === "git" && command.cwd === root);
   }
 
   it("commits after the lockfile step and before the pack, staging ONLY the paths this release wrote", async () => {
     const control = commitFixture();
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff);
 
     const cwCommands = control.commands.filter(
-      command =>
+      (command) =>
         (command.args[1] === "build" && command.args[2] === "create-warlock") ||
         command.args[0] === PNPM_MARKER ||
         (command.command === "git" &&
@@ -889,10 +997,12 @@ describe("per-member release commit (card D1a)", () => {
           (command.args[0] === "add" || command.args[0] === "commit")) ||
         (command.args[1] === "pack" && String(command.args[2]).includes("create-warlock")),
     );
-    const orderedKinds = cwCommands.map(command => {
+    const orderedKinds = cwCommands.map((command) => {
       if (command.args[1] === "build") return "build";
-      if (command.args[0] === PNPM_MARKER && command.args.includes("--lockfile-only")) return "lockfile-only";
-      if (command.args[0] === PNPM_MARKER && command.args.includes("--frozen-lockfile")) return "frozen-lockfile";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--lockfile-only"))
+        return "lockfile-only";
+      if (command.args[0] === PNPM_MARKER && command.args.includes("--frozen-lockfile"))
+        return "frozen-lockfile";
       if (command.command === "git" && command.args[0] === "add") return "add";
       if (command.command === "git" && command.args[0] === "commit") return "commit";
       if (command.args[1] === "pack") return "pack";
@@ -908,15 +1018,15 @@ describe("per-member release commit (card D1a)", () => {
       "pack",
     ]);
 
-    const lockfileCommands = control.commands.filter(command => command.args[0] === PNPM_MARKER);
-    assert.ok(lockfileCommands.every(command => command.cwd !== createWarlockRoot));
-    assert.ok(lockfileCommands.every(command => command.args.includes("--ignore-workspace")));
-    assert.ok(lockfileCommands.every(command => command.args.includes("--ignore-scripts")));
+    const lockfileCommands = control.commands.filter((command) => command.args[0] === PNPM_MARKER);
+    assert.ok(lockfileCommands.every((command) => command.cwd !== createWarlockRoot));
+    assert.ok(lockfileCommands.every((command) => !command.args.includes("--ignore-workspace")));
+    assert.ok(lockfileCommands.every((command) => command.args.includes("--ignore-scripts")));
 
     // create-warlock regenerated a lockfile this run: both package.json and
     // its lockfile are staged and committed, nothing else.
     const cwGit = gitCommandsFor(control, createWarlockRoot).filter(
-      command => command.args[0] === "add" || command.args[0] === "commit",
+      (command) => command.args[0] === "add" || command.args[0] === "commit",
     );
     for (const command of cwGit) {
       assert.deepEqual([...command.args].slice(-2).sort(), ["package.json", "pnpm-lock.yaml"]);
@@ -924,7 +1034,7 @@ describe("per-member release commit (card D1a)", () => {
 
     // notifications has no lockfile: only its package.json is staged.
     const notifGit = gitCommandsFor(control, notificationsRoot).filter(
-      command => command.args[0] === "add" || command.args[0] === "commit",
+      (command) => command.args[0] === "add" || command.args[0] === "commit",
     );
     assert.ok(notifGit.length > 0);
     for (const command of notifGit) {
@@ -951,16 +1061,19 @@ describe("per-member release commit (card D1a)", () => {
         [notificationsRoot, "?? tests/fixtures/somebody-elses-file.ts\n"],
       ]),
     });
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff, "a surface-external dirty file must not block the release");
 
     const notifGit = gitCommandsFor(control, notificationsRoot).filter(
-      command => command.args[0] === "add" || command.args[0] === "commit",
+      (command) => command.args[0] === "add" || command.args[0] === "commit",
     );
     assert.ok(notifGit.length > 0, "the release commit must still happen");
     for (const command of notifGit) {
       assert.ok(
-        !command.args.some(arg => arg.includes("somebody-elses-file")),
+        !command.args.some((arg) => arg.includes("somebody-elses-file")),
         `must never stage a path outside the published surface; got: ${command.args.join(" ")}`,
       );
       assert.deepEqual([...command.args].slice(-1), ["package.json"]);
@@ -971,9 +1084,13 @@ describe("per-member release commit (card D1a)", () => {
     let capturedProvenance: unknown;
     const control = commitFixture();
     control.dependencies.writeTextFile = async (filePath, contents) => {
-      if (path.basename(filePath) === "build-provenance.json") capturedProvenance = JSON.parse(contents);
+      if (path.basename(filePath) === "build-provenance.json")
+        capturedProvenance = JSON.parse(contents);
     };
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff);
 
     const provenance = capturedProvenance as {
@@ -989,7 +1106,7 @@ describe("per-member release commit (card D1a)", () => {
 
   it("RED CONTROL: a member whose release commit fails is refused alone; the others still build; the run throws once", async () => {
     const control = commitFixture({
-      commit: request =>
+      commit: (request) =>
         request.args[0] === "commit" && request.cwd === createWarlockRoot
           ? new Error(`${process.execPath} exited 1: nothing to commit? or hook refused`)
           : { stdout: "", stderr: "" },
@@ -997,7 +1114,7 @@ describe("per-member release commit (card D1a)", () => {
 
     await assert.rejects(
       runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
-      error => {
+      (error) => {
         const message = (error as Error).message;
         assert.match(message, /Refusing to pack create-warlock/);
         assert.match(message, /release edits could not be committed/);
@@ -1006,22 +1123,25 @@ describe("per-member release commit (card D1a)", () => {
     );
 
     const cwPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
     );
     assert.equal(cwPacks.length, 0, "member whose release commit failed must not be packed");
 
     const notifBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+      (command) => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
     );
     const notifPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
     );
     assert.equal(notifBuilds.length, 1, "unaffected sibling must still build");
     assert.equal(notifPacks.length, 1, "unaffected sibling must still pack");
 
     // Restore: a succeeding commit passes green again.
     const cleanControl = commitFixture();
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, cleanControl.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      cleanControl.dependencies,
+    );
     assert.ok(handoff);
   });
 
@@ -1033,19 +1153,35 @@ describe("per-member release commit (card D1a)", () => {
     let capturedProvenance: unknown;
     const control = commitFixture({ staged: () => "" });
     control.dependencies.writeTextFile = async (filePath, contents) => {
-      if (path.basename(filePath) === "build-provenance.json") capturedProvenance = JSON.parse(contents);
+      if (path.basename(filePath) === "build-provenance.json")
+        capturedProvenance = JSON.parse(contents);
     };
 
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff, "a no-op release edit must not refuse the release");
 
-    const commits = control.commands.filter(command => command.command === "git" && command.args[0] === "commit");
-    assert.equal(commits.length, 0, "nothing staged means nothing to commit -- a commit must not even be attempted");
+    const commits = control.commands.filter(
+      (command) => command.command === "git" && command.args[0] === "commit",
+    );
+    assert.equal(
+      commits.length,
+      0,
+      "nothing staged means nothing to commit -- a commit must not even be attempted",
+    );
 
-    const provenance = capturedProvenance as { members: Array<{ name: string; releaseCommitSha: string }> };
+    const provenance = capturedProvenance as {
+      members: Array<{ name: string; releaseCommitSha: string }>;
+    };
     assert.ok(provenance, "provenance must be written");
     for (const entry of provenance.members) {
-      assert.match(entry.releaseCommitSha, /^[0-9a-f]{40}$/, `${entry.name} must record HEAD as its release commit`);
+      assert.match(
+        entry.releaseCommitSha,
+        /^[0-9a-f]{40}$/,
+        `${entry.name} must record HEAD as its release commit`,
+      );
     }
   });
 });
@@ -1067,12 +1203,20 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
   ): ReturnType<typeof fixture> {
     const control = fixture();
     const baseRunCommand = control.dependencies.runCommand!;
-    control.dependencies.runCommand = async request => {
-      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] === "--abbrev-ref") {
+    control.dependencies.runCommand = async (request) => {
+      if (
+        request.command === "git" &&
+        request.args[0] === "rev-parse" &&
+        request.args[1] === "--abbrev-ref"
+      ) {
         control.commands.push(request);
         return { stdout: `${branchesByRoot.get(request.cwd) ?? "main"}\n`, stderr: "" };
       }
-      if (request.command === "git" && request.args[0] === "ls-remote" && request.args[1] === "--symref") {
+      if (
+        request.command === "git" &&
+        request.args[0] === "ls-remote" &&
+        request.args[1] === "--symref"
+      ) {
         control.commands.push(request);
         const value = defaultsByRoot.has(request.cwd) ? defaultsByRoot.get(request.cwd) : "main";
         if (value === null || value === undefined) return { stdout: "", stderr: "" };
@@ -1085,42 +1229,69 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
 
   it("INNOCENT CASE: a member checked out on origin's default branch passes and is otherwise untouched", async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
     );
 
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
 
     assert.ok(handoff);
     assert.equal(
-      control.commands.filter(command => command.args[1] === "build").length,
+      control.commands.filter((command) => command.args[1] === "build").length,
       FAMILY.members.length,
     );
     assert.equal(
-      control.commands.filter(command => command.args[1] === "pack").length,
+      control.commands.filter((command) => command.args[1] === "pack").length,
       FAMILY.members.length,
     );
   });
 
-  it("passes a member checked out on origin's ACTUAL resolved default, even when that default is not \"main\" (never a hardcoded name)", async () => {
+  it('passes a member checked out on origin\'s ACTUAL resolved default, even when that default is not "main" (never a hardcoded name)', async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "trunk"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "trunk"]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "trunk"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "trunk"],
+      ]),
     );
 
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
 
-    assert.ok(handoff, "checked out on origin's own resolved default -- must pass even though it isn't \"main\"");
+    assert.ok(
+      handoff,
+      "checked out on origin's own resolved default -- must pass even though it isn't \"main\"",
+    );
     const cwPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
     );
     assert.equal(cwPacks.length, 1);
   });
 
   it("refuses a member parked on a non-default branch, naming the member and BOTH branches", async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "fix/scaffold-npm-arborist"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "fix/scaffold-npm-arborist"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
     );
 
     await assert.rejects(
@@ -1136,8 +1307,14 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
 
   it("one member refused on branch does not stop the others: they still build and pack, and the run throws once at the end", async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "fix/scaffold-npm-arborist"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "fix/scaffold-npm-arborist"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
     );
 
     await assert.rejects(
@@ -1145,15 +1322,15 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
     );
 
     const cwBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "create-warlock",
+      (command) => command.args[1] === "build" && command.args[2] === "create-warlock",
     );
     assert.equal(cwBuilds.length, 0, "the refused member must never be built");
 
     const notifBuilds = control.commands.filter(
-      command => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
+      (command) => command.args[1] === "build" && command.args[2] === "@warlock.js/notifications",
     );
     const notifPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("notifications"),
     );
     assert.equal(notifBuilds.length, 1, "the unaffected sibling must still build");
     assert.equal(notifPacks.length, 1, "the unaffected sibling must still pack");
@@ -1162,11 +1339,17 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
 
   it("an explicit --allow-branch opt-in genuinely permits the deliberate branch release, and REPORTS its use", async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "fix/scaffold-npm-arborist"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "fix/scaffold-npm-arborist"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
     );
     const reported: string[] = [];
-    control.dependencies.report = line => reported.push(line);
+    control.dependencies.report = (line) => reported.push(line);
 
     const handoff = await runReleaseFamily(
       {
@@ -1180,11 +1363,13 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
 
     assert.ok(handoff, "the opt-in must let the deliberate branch release through");
     const cwPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
     );
     assert.equal(cwPacks.length, 1, "the explicitly overridden member must still build and pack");
 
-    const overrideLine = reported.find(line => line.includes("BRANCH OVERRIDE") && line.includes("create-warlock"));
+    const overrideLine = reported.find(
+      (line) => line.includes("BRANCH OVERRIDE") && line.includes("create-warlock"),
+    );
     assert.ok(overrideLine, "the override must be reported in the run output");
     assert.match(overrideLine!, /fix\/scaffold-npm-arborist/);
     assert.match(overrideLine!, /main/);
@@ -1192,8 +1377,14 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
 
   it("REFUSES rather than passes when origin's default branch cannot be resolved at all", async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, null]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, null],
+      ]),
     );
 
     await assert.rejects(
@@ -1205,22 +1396,32 @@ describe("per-member remote-default-branch gate (the create-warlock / parked-bra
       },
     );
     const cwPacks = control.commands.filter(
-      command => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
+      (command) => command.args[1] === "pack" && String(command.args[2]).includes("create-warlock"),
     );
     assert.equal(cwPacks.length, 0, "an unresolvable default must never be treated as a pass");
   });
 
   it("records BOTH the checked-out branch and origin's default branch in provenance", async () => {
     const control = withBranches(
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
-      new Map([[notificationsRoot, "main"], [createWarlockRoot, "main"]]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
+      new Map([
+        [notificationsRoot, "main"],
+        [createWarlockRoot, "main"],
+      ]),
     );
     let capturedProvenance: unknown;
     control.dependencies.writeTextFile = async (filePath, contents) => {
-      if (path.basename(filePath) === "build-provenance.json") capturedProvenance = JSON.parse(contents);
+      if (path.basename(filePath) === "build-provenance.json")
+        capturedProvenance = JSON.parse(contents);
     };
 
-    const handoff = await runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies);
+    const handoff = await runReleaseFamily(
+      { mode: "gate", version: VERSION, ...FULL_MATRIX },
+      control.dependencies,
+    );
     assert.ok(handoff);
 
     const provenance = capturedProvenance as {
@@ -1283,7 +1484,10 @@ describe("resolveLocalPackageScript (real filesystem, no mocking)", () => {
   it("walks up to an ancestor when the package's own node_modules has no such binary", () => {
     // A child directory under builderRoot has no node_modules of its own;
     // resolution must still find the real ancestor entry.
-    const invocation = resolveLocalPackageScript(path.join(builderRoot, "scripts"), "tsx --version");
+    const invocation = resolveLocalPackageScript(
+      path.join(builderRoot, "scripts"),
+      "tsx --version",
+    );
     assert.ok(existsSync(invocation.args[0] as string));
     assert.ok((invocation.args[0] as string).startsWith(path.join(builderRoot, "node_modules")));
   });
@@ -1375,19 +1579,20 @@ describe("runReleaseFamily publish mode", () => {
       sha256: HASH,
     }));
     const control = fixture({
-      readTextFile: async () => JSON.stringify({
-        kind: "warlock-family-publish-handoff",
-        candidateVersion: VERSION,
-        subjects: FAMILY.members.map(member => member.name),
-        artifacts,
-        verifiedAt: "2026-09-02T12:00:00.000Z",
-        matrixScope: "full",
-      }),
-      sha256File: async filePath => {
+      readTextFile: async () =>
+        JSON.stringify({
+          kind: "warlock-family-publish-handoff",
+          candidateVersion: VERSION,
+          subjects: FAMILY.members.map((member) => member.name),
+          artifacts,
+          verifiedAt: "2026-09-02T12:00:00.000Z",
+          matrixScope: "full",
+        }),
+      sha256File: async (filePath) => {
         events.push(`hash:${path.basename(filePath)}`);
         return HASH;
       },
-      runCommand: async request => {
+      runCommand: async (request) => {
         if (request.args[1] === "config") {
           events.push("config");
           return { stdout: `${NPM_ORIGIN}/\n`, stderr: "" };
@@ -1424,16 +1629,17 @@ describe("runReleaseFamily publish mode", () => {
       sha256: HASH,
     }));
     const control = fixture({
-      readTextFile: async () => JSON.stringify({
-        kind: "warlock-family-publish-handoff",
-        candidateVersion: VERSION,
-        subjects: FAMILY.members.map(member => member.name),
-        artifacts,
-        verifiedAt: "2026-09-02T12:00:00.000Z",
-        matrixScope: "full",
-      }),
-      report: line => reported.push(line),
-      runCommand: async request => {
+      readTextFile: async () =>
+        JSON.stringify({
+          kind: "warlock-family-publish-handoff",
+          candidateVersion: VERSION,
+          subjects: FAMILY.members.map((member) => member.name),
+          artifacts,
+          verifiedAt: "2026-09-02T12:00:00.000Z",
+          matrixScope: "full",
+        }),
+      report: (line) => reported.push(line),
+      runCommand: async (request) => {
         if (request.args[1] === "config") return { stdout: `${NPM_ORIGIN}/\n`, stderr: "" };
         return { stdout: "", stderr: "" };
       },
@@ -1486,7 +1692,7 @@ describe("--reuse-artifacts", () => {
     ];
 
     const baseReadTextFile = control.dependencies.readTextFile!;
-    control.dependencies.readTextFile = async filePath => {
+    control.dependencies.readTextFile = async (filePath) => {
       if (path.basename(filePath) === "build-provenance.json") {
         return JSON.stringify({
           schemaVersion: 1,
@@ -1498,11 +1704,16 @@ describe("--reuse-artifacts", () => {
       return await baseReadTextFile(filePath);
     };
 
-    control.dependencies.fileExists = async filePath => path.basename(filePath) !== "pnpm-workspace.yaml";
+    control.dependencies.fileExists = async (filePath) =>
+      path.basename(filePath) !== "pnpm-workspace.yaml";
 
     const baseRunCommand = control.dependencies.runCommand!;
-    control.dependencies.runCommand = async request => {
-      if (request.command === "git" && request.args[0] === "rev-parse" && request.args[1] !== "--abbrev-ref") {
+    control.dependencies.runCommand = async (request) => {
+      if (
+        request.command === "git" &&
+        request.args[0] === "rev-parse" &&
+        request.args[1] !== "--abbrev-ref"
+      ) {
         control.commands.push(request);
         const recorded = request.cwd === notificationsRoot ? RECORDED_HEAD_NOTIF : RECORDED_HEAD_CW;
         const head = options.headsByRoot?.get(request.cwd) ?? recorded;
@@ -1516,7 +1727,7 @@ describe("--reuse-artifacts", () => {
     };
 
     const baseSha256File = control.dependencies.sha256File!;
-    control.dependencies.sha256File = async filePath => {
+    control.dependencies.sha256File = async (filePath) => {
       const override = options.hashOverridesByPath?.get(filePath);
       return override ?? (await baseSha256File(filePath));
     };
@@ -1536,8 +1747,12 @@ describe("--reuse-artifacts", () => {
 
     assert.ok(handoff);
     assert.notEqual(handoff.reusedArtifacts, true);
-    const builds = control.commands.filter(command => command.args[1] === "build");
-    assert.equal(builds.length, FAMILY.members.length, "a hash mismatch must trigger rebuilding EVERY member, never a partial reuse");
+    const builds = control.commands.filter((command) => command.args[1] === "build");
+    assert.equal(
+      builds.length,
+      FAMILY.members.length,
+      "a hash mismatch must trigger rebuilding EVERY member, never a partial reuse",
+    );
     assert.equal(control.handoffs.length, 1);
   });
 
@@ -1553,8 +1768,12 @@ describe("--reuse-artifacts", () => {
 
     assert.ok(handoff);
     assert.notEqual(handoff.reusedArtifacts, true);
-    const builds = control.commands.filter(command => command.args[1] === "build");
-    assert.equal(builds.length, FAMILY.members.length, "a moved HEAD must trigger rebuilding EVERY member, never a partial reuse");
+    const builds = control.commands.filter((command) => command.args[1] === "build");
+    assert.equal(
+      builds.length,
+      FAMILY.members.length,
+      "a moved HEAD must trigger rebuilding EVERY member, never a partial reuse",
+    );
   });
 
   it("REFUSES reuse when a package's working tree changed since the recorded build, and does a FULL rebuild instead", async () => {
@@ -1572,8 +1791,12 @@ describe("--reuse-artifacts", () => {
 
     assert.ok(handoff);
     assert.notEqual(handoff.reusedArtifacts, true);
-    const builds = control.commands.filter(command => command.args[1] === "build");
-    assert.equal(builds.length, FAMILY.members.length, "an unrecorded working-tree change must trigger rebuilding EVERY member");
+    const builds = control.commands.filter((command) => command.args[1] === "build");
+    assert.equal(
+      builds.length,
+      FAMILY.members.length,
+      "an unrecorded working-tree change must trigger rebuilding EVERY member",
+    );
   });
 
   it("ACCEPTS reuse when every tarball re-hashes clean and every package's HEAD/tree match the recorded build -- and the handoff records the reuse", async () => {
@@ -1589,10 +1812,10 @@ describe("--reuse-artifacts", () => {
     assert.ok(handoff.reuseProvenance);
     assert.equal(handoff.reuseProvenance!.length, FAMILY.members.length);
     assert.deepEqual(
-      handoff.artifacts.map(artifact => artifact.tarballPath),
+      handoff.artifacts.map((artifact) => artifact.tarballPath),
       [RECORDED_TARBALL_NOTIF, RECORDED_TARBALL_CW],
     );
-    const builds = control.commands.filter(command => command.args[1] === "build");
+    const builds = control.commands.filter((command) => command.args[1] === "build");
     assert.equal(builds.length, 0, "a fully valid reuse must never rebuild any member");
     assert.equal(control.handoffs.length, 1);
     assert.equal(control.handoffs[0]?.reusedArtifacts, true);
@@ -1614,13 +1837,13 @@ describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
    */
   const captureScope = (control: ReturnType<typeof fixture>) => {
     const seen: { scope?: string; only?: readonly string[] } = {};
-    control.dependencies.runLocalGate = async input => {
+    control.dependencies.runLocalGate = async (input) => {
       seen.scope = input.matrixScope;
       seen.only = input.onlyFeatures;
       return {
         kind: "warlock-family-publish-handoff",
         candidateVersion: input.candidateVersion,
-        artifacts: input.artifacts.map(artifact => ({ ...artifact })),
+        artifacts: input.artifacts.map((artifact) => ({ ...artifact })),
         verifiedAt: "2026-09-02T12:00:00.000Z",
         matrixScope: input.matrixScope,
         ...(input.onlyFeatures ? { matrixRows: [...input.onlyFeatures] } : {}),
@@ -1668,10 +1891,10 @@ describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
         matrixScope: "subset",
         only: ["create-warlock"],
         matrixAuthorisation: {
-  authorisedBy: "Hasan",
-  date: "2026-09-07",
-  quote: "run the create-warlock row only",
-},
+          authorisedBy: "Hasan",
+          date: "2026-09-07",
+          quote: "run the create-warlock row only",
+        },
       },
       control.dependencies,
     )) as ReleaseHandoff;
@@ -1712,11 +1935,15 @@ describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
 
   it("REFUSES a subset with no rows, and a full or none that carries rows", async () => {
     assert.throws(
-      () => assertMatrixScopeIsStated({ matrixScope: "subset", matrixAuthorisation: {
-  authorisedBy: "Hasan",
-  date: "2026-09-07",
-  quote: "run the create-warlock row only",
-} }),
+      () =>
+        assertMatrixScopeIsStated({
+          matrixScope: "subset",
+          matrixAuthorisation: {
+            authorisedBy: "Hasan",
+            date: "2026-09-07",
+            quote: "run the create-warlock row only",
+          },
+        }),
       /subset with no selection/,
     );
     assert.throws(
@@ -1725,10 +1952,10 @@ describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
           matrixScope: "full",
           only: ["web"],
           matrixAuthorisation: {
-  authorisedBy: "Hasan",
-  date: "2026-09-07",
-  quote: "run the create-warlock row only",
-},
+            authorisedBy: "Hasan",
+            date: "2026-09-07",
+            quote: "run the create-warlock row only",
+          },
         }),
       /must not carry a row selection/,
     );
@@ -1740,11 +1967,15 @@ describe("the generator-matrix scope (card 26831930, canon e00fb7b8)", () => {
 
   it("REFUSES an authorisation attached to 'none' — nobody has to authorise the default", () => {
     assert.throws(
-      () => assertMatrixScopeIsStated({ matrixScope: "none", matrixAuthorisation: {
-  authorisedBy: "Hasan",
-  date: "2026-09-07",
-  quote: "run the create-warlock row only",
-} }),
+      () =>
+        assertMatrixScopeIsStated({
+          matrixScope: "none",
+          matrixAuthorisation: {
+            authorisedBy: "Hasan",
+            date: "2026-09-07",
+            quote: "run the create-warlock row only",
+          },
+        }),
       /needs no authorisation/,
     );
   });
@@ -1825,10 +2056,16 @@ function respondToGitCommand(request: CommandRequest, responses: GitResponses) {
   if (a0 === "ls-remote") {
     const ref = request.args[2];
     if (ref?.startsWith("refs/heads/")) {
-      return { stdout: responses.originBranchTip ? `${responses.originBranchTip}\t${ref}\n` : "", stderr: "" };
+      return {
+        stdout: responses.originBranchTip ? `${responses.originBranchTip}\t${ref}\n` : "",
+        stderr: "",
+      };
     }
     if (ref?.startsWith("refs/tags/")) {
-      return { stdout: responses.originTagSha ? `${responses.originTagSha}\t${ref}\n` : "", stderr: "" };
+      return {
+        stdout: responses.originTagSha ? `${responses.originTagSha}\t${ref}\n` : "",
+        stderr: "",
+      };
     }
     throw new Error(`unexpected ls-remote ref: ${String(ref)}`);
   }
@@ -1876,13 +2113,13 @@ function makeMember(name: string, root: string): WarlockFamilyMember {
 function provenanceReadTextFile(
   members: ReadonlyArray<{ name: string; releaseCommitSha: string }>,
 ): (filePath: string) => Promise<string> {
-  return async filePath => {
+  return async (filePath) => {
     if (path.basename(filePath) === "build-provenance.json") {
       return JSON.stringify({
         schemaVersion: 1,
         family: "warlock",
         version: VERSION,
-        members: members.map(member => ({
+        members: members.map((member) => ({
           name: member.name,
           version: VERSION,
           tarballPath: path.resolve(`${member.name.replace(/[@/]/g, "-")}.tgz`),
@@ -1907,7 +2144,7 @@ describe("tagAndPushMember (D1b)", () => {
     const outcome = await tagAndPushMember(member, VERSION, sha, runtime as never);
 
     assert.equal(outcome.refused, false);
-    const tagCommand = runtime.commands.find(command => command.args[0] === "tag");
+    const tagCommand = runtime.commands.find((command) => command.args[0] === "tag");
     assert.ok(tagCommand, "a tag command must have been issued");
     assert.deepEqual(tagCommand!.args, ["tag", releaseTagName(VERSION), sha]);
     // respondToGitCommand throws on any git invocation it was not told to
@@ -1926,7 +2163,10 @@ describe("tagAndPushMember (D1b)", () => {
     assert.equal(outcome.refused, false);
     assert.equal(outcome.alreadyTagged, true);
     assert.equal(outcome.tagged, false);
-    assert.equal(runtime.commands.some(command => command.args[0] === "tag"), false);
+    assert.equal(
+      runtime.commands.some((command) => command.args[0] === "tag"),
+      false,
+    );
   });
 
   it("an existing local tag at a DIFFERENT sha is a refusal, and --force is never passed", async () => {
@@ -1939,7 +2179,10 @@ describe("tagAndPushMember (D1b)", () => {
     assert.equal(outcome.refused, true);
     assert.match(outcome.refusalMessage, /already exists locally/);
     assert.match(outcome.refusalMessage, new RegExp(member.name.replace(/[/.]/g, "\\$&")));
-    assert.equal(runtime.commands.some(command => command.args.includes("--force")), false);
+    assert.equal(
+      runtime.commands.some((command) => command.args.includes("--force")),
+      false,
+    );
   });
 
   it("an existing origin tag at a DIFFERENT sha is a refusal, and --force is never passed", async () => {
@@ -1951,7 +2194,10 @@ describe("tagAndPushMember (D1b)", () => {
 
     assert.equal(outcome.refused, true);
     assert.match(outcome.refusalMessage, /already exists there/);
-    assert.equal(runtime.commands.some(command => command.args.includes("--force")), false);
+    assert.equal(
+      runtime.commands.some((command) => command.args.includes("--force")),
+      false,
+    );
   });
 
   it("a fully outstanding member is tagged locally, tagged at origin, and pushed at the recorded sha", async () => {
@@ -1967,7 +2213,10 @@ describe("tagAndPushMember (D1b)", () => {
     assert.equal(outcome.pushed, true);
     assert.ok(
       runtime.commands.some(
-        command => command.args[0] === "push" && command.args[1] === "origin" && command.args[2] === `${sha}:refs/heads/main`,
+        (command) =>
+          command.args[0] === "push" &&
+          command.args[1] === "origin" &&
+          command.args[2] === `${sha}:refs/heads/main`,
       ),
       "must push exactly the recorded sha to the branch ref, never the branch tip",
     );
@@ -1998,18 +2247,13 @@ describe("tagAndPushAllMembers (D1b)", () => {
     const handoff = { subjects: [notif.name, cw.name] } as unknown as ReleaseHandoff;
 
     await assert.rejects(
-      tagAndPushAllMembers(
-        family,
-        handoff,
-        VERSION,
-        {
-          runCommand: runtime.runCommand,
-          readTextFile: provenanceReadTextFile([
-            { name: notif.name, releaseCommitSha: notifSha },
-            { name: cw.name, releaseCommitSha: cwSha },
-          ]),
-        } as never,
-      ),
+      tagAndPushAllMembers(family, handoff, VERSION, {
+        runCommand: runtime.runCommand,
+        readTextFile: provenanceReadTextFile([
+          { name: notif.name, releaseCommitSha: notifSha },
+          { name: cw.name, releaseCommitSha: cwSha },
+        ]),
+      } as never),
       (error: Error) => {
         assert.match(error.message, /@warlock\.js\/notifications/);
         assert.match(error.message, /main/);
@@ -2019,14 +2263,16 @@ describe("tagAndPushAllMembers (D1b)", () => {
     );
 
     const cwWrites = runtime.commands.filter(
-      command => command.cwd === cw.root && (command.args[0] === "tag" || command.args[0] === "push"),
+      (command) =>
+        command.cwd === cw.root && (command.args[0] === "tag" || command.args[0] === "push"),
     );
     assert.ok(
       cwWrites.length > 0,
       "create-warlock must still be tagged and pushed even though notifications was refused",
     );
     const notifWrites = runtime.commands.filter(
-      command => command.cwd === notif.root && (command.args[0] === "tag" || command.args[0] === "push"),
+      (command) =>
+        command.cwd === notif.root && (command.args[0] === "tag" || command.args[0] === "push"),
     );
     assert.equal(notifWrites.length, 0, "the refused member must never be tagged or pushed");
   });
@@ -2039,28 +2285,31 @@ describe("tagAndPushAllMembers (D1b)", () => {
     // notifications was fully tagged + pushed in a prior run; create-warlock is outstanding.
     const runtime = fakeGitRuntimeByRoot(
       new Map([
-        [notif.root, { branch: "main", localTagSha: notifSha, originTagSha: notifSha, originBranchTip: notifSha }],
+        [
+          notif.root,
+          {
+            branch: "main",
+            localTagSha: notifSha,
+            originTagSha: notifSha,
+            originBranchTip: notifSha,
+          },
+        ],
         [cw.root, { branch: "main" }],
       ]),
     );
     const family: WarlockFamily = { name: "warlock", version: VERSION, members: [notif, cw] };
     const handoff = { subjects: [notif.name, cw.name] } as unknown as ReleaseHandoff;
 
-    const results = await tagAndPushAllMembers(
-      family,
-      handoff,
-      VERSION,
-      {
-        runCommand: runtime.runCommand,
-        readTextFile: provenanceReadTextFile([
-          { name: notif.name, releaseCommitSha: notifSha },
-          { name: cw.name, releaseCommitSha: cwSha },
-        ]),
-      } as never,
-    );
+    const results = await tagAndPushAllMembers(family, handoff, VERSION, {
+      runCommand: runtime.runCommand,
+      readTextFile: provenanceReadTextFile([
+        { name: notif.name, releaseCommitSha: notifSha },
+        { name: cw.name, releaseCommitSha: cwSha },
+      ]),
+    } as never);
 
     assert.deepEqual(
-      results.map(result => ({
+      results.map((result) => ({
         name: result.name,
         tagged: result.tagged,
         alreadyTagged: result.alreadyTagged,
@@ -2068,18 +2317,30 @@ describe("tagAndPushAllMembers (D1b)", () => {
         alreadyPushed: result.alreadyPushed,
       })),
       [
-        { name: notif.name, tagged: false, alreadyTagged: true, pushed: false, alreadyPushed: true },
+        {
+          name: notif.name,
+          tagged: false,
+          alreadyTagged: true,
+          pushed: false,
+          alreadyPushed: true,
+        },
         { name: cw.name, tagged: true, alreadyTagged: false, pushed: true, alreadyPushed: false },
       ],
     );
 
     const notifWrites = runtime.commands.filter(
-      command => command.cwd === notif.root && (command.args[0] === "tag" || command.args[0] === "push"),
+      (command) =>
+        command.cwd === notif.root && (command.args[0] === "tag" || command.args[0] === "push"),
     );
-    assert.equal(notifWrites.length, 0, "an already-tagged-and-pushed member must issue no write commands on re-run");
+    assert.equal(
+      notifWrites.length,
+      0,
+      "an already-tagged-and-pushed member must issue no write commands on re-run",
+    );
 
     const cwWrites = runtime.commands.filter(
-      command => command.cwd === cw.root && (command.args[0] === "tag" || command.args[0] === "push"),
+      (command) =>
+        command.cwd === cw.root && (command.args[0] === "tag" || command.args[0] === "push"),
     );
     assert.ok(cwWrites.length > 0, "the outstanding member must still be tagged/pushed");
   });
@@ -2089,12 +2350,12 @@ describe("runReleaseFamily confirm mode — tag and push only after origin confi
   it("tags and pushes nothing when origin confirmation fails", async () => {
     const handoffPath = path.resolve("confirm-red-control-handoff.json");
     const control = fixture({
-      readTextFile: async filePath => {
+      readTextFile: async (filePath) => {
         if (filePath === handoffPath) {
           return JSON.stringify({
             kind: "warlock-family-publish-handoff",
             candidateVersion: VERSION,
-            subjects: FAMILY.members.map(member => member.name),
+            subjects: FAMILY.members.map((member) => member.name),
             artifacts: FAMILY.members.map((member, index) => ({
               name: member.name,
               tarballPath: path.resolve(`confirm-artifact-${index}.tgz`),
@@ -2108,10 +2369,12 @@ describe("runReleaseFamily confirm mode — tag and push only after origin confi
       },
       sha256File: async () => HASH,
     });
-    control.dependencies.runCommand = async request => {
+    control.dependencies.runCommand = async (request) => {
       control.commands.push(request);
       if (request.command === "git") {
-        throw new Error(`unexpected git command reached before origin confirmation succeeded: ${request.args.join(" ")}`);
+        throw new Error(
+          `unexpected git command reached before origin confirmation succeeded: ${request.args.join(" ")}`,
+        );
       }
       if (request.args[1] === "view") {
         throw new Error("npm origin refused to confirm this candidate");
@@ -2124,7 +2387,10 @@ describe("runReleaseFamily confirm mode — tag and push only after origin confi
       /npm origin refused to confirm/,
     );
 
-    assert.equal(control.commands.some(command => command.command === "git"), false);
+    assert.equal(
+      control.commands.some((command) => command.command === "git"),
+      false,
+    );
   });
 });
 
@@ -2135,9 +2401,7 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
   const GLOBAL_NPMRC = path.join(ROOT, "global.npmrc");
   const ENV = { PATH: process.env.PATH ?? "" };
 
-  function fakeRuntime(
-    versionsByAttempt: ReadonlyMap<string, readonly (string | undefined)[]>,
-  ): {
+  function fakeRuntime(versionsByAttempt: ReadonlyMap<string, readonly (string | undefined)[]>): {
     runtime: {
       resolveNpmCli(): string;
       runCommand(request: CommandRequest): Promise<{ stdout: string; stderr: string }>;
@@ -2158,7 +2422,7 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
       viewCalls,
       runtime: {
         resolveNpmCli: () => path.resolve("npm", "bin", "npm-cli.js"),
-        runCommand: async request => {
+        runCommand: async (request) => {
           const name = request.args[2]?.toString().replace(/@[^@]+$/, "") ?? "";
           viewCalls.push(name);
           const attempt = attemptsSeen.get(name) ?? 0;
@@ -2167,8 +2431,8 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
           const observed = attempt < versions.length ? versions[attempt] : versions.at(-1);
           return { stdout: JSON.stringify(observed ?? null), stderr: "" };
         },
-        report: line => reported.push(line),
-        sleep: async ms => {
+        report: (line) => reported.push(line),
+        sleep: async (ms) => {
           sleeps.push(ms);
         },
       },
@@ -2190,15 +2454,19 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
     await confirmSubjectsAtOrigin(handoff, runtime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV);
 
     assert.ok(
-      reported.some(line => line.includes("@warlock.js/notifications") && line.includes("PENDING")),
+      reported.some(
+        (line) => line.includes("@warlock.js/notifications") && line.includes("PENDING"),
+      ),
       "expected a PENDING line before confirmation",
     );
     assert.ok(
-      reported.some(line => line === "@warlock.js/notifications: live (confirmed on attempt 2/5)"),
+      reported.some(
+        (line) => line === "@warlock.js/notifications: live (confirmed on attempt 2/5)",
+      ),
       "expected a live confirmation line naming the successful attempt",
     );
     assert.ok(
-      reported.some(line => line.startsWith("Origin confirmation summary: 1/1 live")),
+      reported.some((line) => line.startsWith("Origin confirmation summary: 1/1 live")),
       "expected the terminal summary to show 1/1 live",
     );
   });
@@ -2219,15 +2487,18 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
     );
 
     assert.ok(
-      reported.some(line => line === "@warlock.js/notifications: MISSING after 5 attempt(s)"),
+      reported.some((line) => line === "@warlock.js/notifications: MISSING after 5 attempt(s)"),
       "expected an explicit MISSING line",
     );
     assert.ok(
-      reported.some(line => line.startsWith("Origin confirmation summary: 0/1 live")),
+      reported.some((line) => line.startsWith("Origin confirmation summary: 0/1 live")),
       "expected the terminal summary on the failing path too",
     );
     assert.equal(sleeps.length, 4, "budget of 5 attempts retries 4 times between them");
-    assert.ok(sleeps.every(ms => ms === 3_000), "the printed/used budget must be the same delay every time");
+    assert.ok(
+      sleeps.every((ms) => ms === 3_000),
+      "the printed/used budget must be the same delay every time",
+    );
   });
 
   it("when two subjects are unconfirmed, BOTH are named -- the old code could name only the first", async () => {
@@ -2242,7 +2513,7 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
 
     await assert.rejects(
       confirmSubjectsAtOrigin(handoff, runtime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV),
-      error => {
+      (error) => {
         assert.match((error as Error).message, /@warlock\.js\/notifications/);
         assert.match((error as Error).message, /create-warlock/);
         return true;
@@ -2271,17 +2542,18 @@ describe("confirmSubjectsAtOrigin — propagation lag vs. a partial release (D2)
     await confirmSubjectsAtOrigin(handoff, spyRuntime, ROOT, CACHE, NPMRC, GLOBAL_NPMRC, ENV);
 
     assert.ok(seenArgs.length > 0);
-    assert.ok(seenArgs.every(args => !args.includes("--dry-run")));
+    assert.ok(seenArgs.every((args) => !args.includes("--dry-run")));
   });
 });
 
 describe("physical Core proof", () => {
   it("rejects duplicate physical Core installations", () => {
     assert.throws(
-      () => assertSinglePhysicalCore([
-        path.resolve("app/node_modules/@warlock.js/core"),
-        path.resolve("app/node_modules/x/node_modules/@warlock.js/core"),
-      ]),
+      () =>
+        assertSinglePhysicalCore([
+          path.resolve("app/node_modules/@warlock.js/core"),
+          path.resolve("app/node_modules/x/node_modules/@warlock.js/core"),
+        ]),
       /exactly one physical/,
     );
     assert.doesNotThrow(() =>

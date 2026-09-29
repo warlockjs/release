@@ -33,7 +33,7 @@
   "ai-tools": 4,
   "ai-workspace": 2,
   "ai-xai": 0,
-  "auth": 18,
+  "auth": 13,
   "cache": 7,
   "cascade": 17,
   "context": 2,
@@ -46,5 +46,8 @@
   "queue": 0,
   "scheduler": 6,
   "seal": 7,
-  "web": 1
+  // A package whose skill was written today starts clean: its one snippet is
+  // self-contained and compiles. This number only ever moves down.
+  "sitemap": 0,
+  "web": 0
 }
