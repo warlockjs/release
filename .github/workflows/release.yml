@@ -128,7 +128,7 @@ jobs:
         # `astro:content` types live in docs/.astro, which is generated and
         # gitignored; without it the strictness ratchet counts phantom errors.
         working-directory: ws/docs
-        run: node node_modules/astro/astro.js sync
+        run: node node_modules/astro/bin/astro.mjs sync
 
       - name: "Diagnose: type packages fs compiles against"
         continue-on-error: true
