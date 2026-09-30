@@ -17,10 +17,10 @@
   // count was unchanged. Ratchet applied both directions per policy.
   "access": 0,
   "ai": 463,
-  "ai-anthropic": 47,
-  "ai-bedrock": 44,
+  "ai-anthropic": 19,
+  "ai-bedrock": 27,
   "ai-deepseek": 0,
-  "ai-google": 49,
+  "ai-google": 38,
   "ai-groq": 0,
   "ai-live": 1,
   "ai-mistral": 0,
