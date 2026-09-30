@@ -1704,6 +1704,49 @@ describe("runReleaseFamily publish mode", () => {
       "[2/2] create-warlock: published",
     ]);
   });
+
+  it("skips versions already live at the origin so a partial publish can be re-run", async () => {
+    const reported: string[] = [];
+    const published: string[] = [];
+    const artifacts = FAMILY.members.map((member, index) => ({
+      name: member.name,
+      tarballPath: path.resolve(`artifact-${index}.tgz`),
+      sha256: HASH,
+    }));
+    const control = fixture({
+      readTextFile: async () =>
+        JSON.stringify({
+          kind: "warlock-family-publish-handoff",
+          candidateVersion: VERSION,
+          subjects: FAMILY.members.map((member) => member.name),
+          artifacts,
+          verifiedAt: "2026-09-02T12:00:00.000Z",
+          matrixScope: "full",
+        }),
+      report: (line) => reported.push(line),
+      runCommand: async (request) => {
+        if (request.args[1] === "config") return { stdout: `${NPM_ORIGIN}/\n`, stderr: "" };
+        if (request.args[1] === "view") {
+          assert.ok(request.args.includes(NPM_ORIGIN));
+          assert.ok(request.args.includes("--prefer-online"));
+          if (request.args[2] === `@warlock.js/notifications@${VERSION}`) {
+            return { stdout: JSON.stringify(VERSION), stderr: "" };
+          }
+          throw new Error("npm error code E404");
+        }
+        if (request.args[1] === "publish") published.push(path.basename(request.args[2]));
+        return { stdout: "", stderr: "" };
+      },
+    });
+
+    await runReleaseFamily({ mode: "publish", version: VERSION }, control.dependencies);
+
+    assert.deepEqual(published, ["artifact-1.tgz"]);
+    assert.deepEqual(reported, [
+      `[1/2] @warlock.js/notifications: already live at ${VERSION}, skipped`,
+      "[2/2] create-warlock: published",
+    ]);
+  });
 });
 
 describe("--reuse-artifacts", () => {

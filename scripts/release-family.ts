@@ -1786,6 +1786,43 @@ async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promis
     const total = handoff.artifacts.length;
     for (const [index, artifact] of handoff.artifacts.entries()) {
       await assertArtifactHash(artifact, runtime.sha256File);
+
+      // Re-runnable: a publish that stopped part-way (or one npm accepted
+      // but never recorded) is finished by running publish again. Versions
+      // already live at the origin are skipped rather than failing the run
+      // with "cannot publish over the previously published version".
+      const live = await runtime
+        .runCommand({
+          command: process.execPath,
+          args: [
+            runtime.resolveNpmCli(),
+            "view",
+            `${artifact.name}@${handoff.candidateVersion}`,
+            "version",
+            "--json",
+            "--registry",
+            NPM_ORIGIN,
+            "--prefer-online",
+            "--cache",
+            cache,
+            "--userconfig",
+            userconfig,
+            "--globalconfig",
+            globalconfig,
+          ],
+          cwd: root,
+          env,
+        })
+        .then((result) => parseJsonOrText(result.stdout) === handoff.candidateVersion)
+        .catch(() => false);
+
+      if (live) {
+        runtime.report(
+          `[${index + 1}/${total}] ${artifact.name}: already live at ${handoff.candidateVersion}, skipped`,
+        );
+        continue;
+      }
+
       await runtime.runCommand({
         command: process.execPath,
         args: [
