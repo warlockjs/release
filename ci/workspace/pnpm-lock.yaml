@@ -587,8 +587,8 @@ importers:
         specifier: ^4.0.2
         version: 4.0.2
       '@mongez/supportive-is':
-        specifier: ^2.1.5
-        version: 2.1.5
+        specifier: ^3.0.0
+        version: 3.0.0
       '@warlock.js/context':
         specifier: workspace:^
         version: link:../context
@@ -729,8 +729,8 @@ importers:
         specifier: ^1.0.7
         version: 1.0.7
       '@mongez/supportive-is':
-        specifier: ^2.1.5
-        version: 2.1.5
+        specifier: ^3.0.0
+        version: 3.0.0
       '@mongez/time-wizard':
         specifier: ^1.0.6
         version: 1.0.6
@@ -1115,8 +1115,8 @@ importers:
         specifier: ^4.0.2
         version: 4.0.2
       '@mongez/supportive-is':
-        specifier: ^2.1.5
-        version: 2.1.5
+        specifier: ^3.0.0
+        version: 3.0.0
       dayjs:
         specifier: ^1.11.9
         version: 1.11.23
@@ -2543,11 +2543,11 @@ packages:
   '@mongez/slug@1.0.7':
     resolution: {integrity: sha512-f9OPHfR5UkZ5Vy5stN2mGNCGUx+mMXrjcCxqq+9XfUj1EYIeaq6eu1LaNGpganJ9pduoOaa2xWY8yiElVXv8bA==}
 
-  '@mongez/supportive-is@2.1.4':
-    resolution: {integrity: sha512-+PrVMv6Y9eT3gvaVvcbKP0powoVDwmGhilO4li8iEkrMaBU2iiZuRbCCE9+UMcBCCnu0LYnXEdpfLxeumlHuOg==}
-
   '@mongez/supportive-is@2.1.5':
     resolution: {integrity: sha512-GnygqdORJGNIfc8+wci21o5MyPjQ6DuiFHHQDfw98zUNYgAbxXE6B1VI3tKB4QG7gw0Nuz+IVe0NZ1PCSQ6TcA==}
+
+  '@mongez/supportive-is@3.0.0':
+    resolution: {integrity: sha512-KbJaaktR7ZgciWQpnhHvDurt+I2pA9cl5JuCzOWoX6PjLEk0JCdCcWA2x0FortErY2hhINBLp6fTeRcigw/iZA==}
 
   '@mongez/time-wizard@1.0.6':
     resolution: {integrity: sha512-98CYFywB9UXDZGiIp1qOLqmBSjPocCgaFvWnryoGOG+eAzVCvOx1pkGiUbSYAah1mdnSldxWM5hE8pf2XIAWxA==}
@@ -6872,6 +6872,10 @@ packages:
     resolution: {integrity: sha512-u82N74LFzG8ca+dD8puPnplTXoGH4fTPpVGuIbt36G3qvNlkvfD0lEAZSxaly3KX8TS/L1A1gsCEmvKmBcVbkQ==}
     engines: {node: ^10 || ^12 || >=14}
 
+  postcss@8.5.28:
+    resolution: {integrity: sha512-RRuzqDtt5Y9h3quz5hWhK+TPnsmVs6WwSU6LkJMeY4HstUEDuYTG8UJSdawMRzmzAtV+KEoG8N3Qg2qLy5vM/A==}
+    engines: {node: ^10 || ^12 || >=14}
+
   postgres-array@2.0.0:
     resolution: {integrity: sha512-VpZrUqU5A69eQyW2c5CA1jtLecCsN2U/bD6VilrFDWq5+5UIEVO7nazS3TEcHf1zuPYO/sqGvUvW62g86RXZuA==}
     engines: {node: '>=4'}
@@ -9752,7 +9756,7 @@ snapshots:
       '@mongez/events': 2.2.7
       '@mongez/localization': 3.5.0
       '@mongez/reinforcements': 3.3.0
-      '@mongez/supportive-is': 2.1.4
+      '@mongez/supportive-is': 2.1.5
       react: 19.2.8
 
   '@mongez/reinforcements@2.4.0': {}
@@ -9772,9 +9776,9 @@ snapshots:
 
   '@mongez/slug@1.0.7': {}
 
-  '@mongez/supportive-is@2.1.4': {}
-
   '@mongez/supportive-is@2.1.5': {}
+
+  '@mongez/supportive-is@3.0.0': {}
 
   '@mongez/time-wizard@1.0.6':
     dependencies:
@@ -14873,6 +14877,12 @@ snapshots:
       picocolors: 1.1.1
       source-map-js: 1.2.1
 
+  postcss@8.5.28:
+    dependencies:
+      nanoid: 3.3.18
+      picocolors: 1.1.1
+      source-map-js: 1.2.1
+
   postgres-array@2.0.0: {}
 
   postgres-bytea@1.0.1: {}
@@ -16211,7 +16221,7 @@ snapshots:
       esbuild: 0.27.7
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
-      postcss: 8.5.26
+      postcss: 8.5.28
       rollup: 4.63.1
       tinyglobby: 0.2.17
     optionalDependencies:
@@ -16225,7 +16235,7 @@ snapshots:
       esbuild: 0.27.7
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
-      postcss: 8.5.26
+      postcss: 8.5.28
       rollup: 4.63.1
       tinyglobby: 0.2.17
     optionalDependencies:
@@ -16239,7 +16249,7 @@ snapshots:
       esbuild: 0.27.7
       fdir: 6.5.0(picomatch@4.0.7)
       picomatch: 4.0.7
-      postcss: 8.5.26
+      postcss: 8.5.28
       rollup: 4.63.1
       tinyglobby: 0.2.17
     optionalDependencies:

@@ -70,6 +70,7 @@ minimumReleaseAgeExclude:
   - '@bull-board/api@9.10.2'
   - '@bull-board/fastify@9.10.2'
   - '@bull-board/ui@9.10.2'
+  - '@mongez/supportive-is@3.0.0'
 
 # Hoisted into the ROOT node_modules for TOOLING VISIBILITY only.
 #
