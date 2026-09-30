@@ -7,6 +7,7 @@ import { afterEach, test } from "node:test";
 import {
   deriveWarlockFamily,
   loadAuthoritativeWarlockFamily,
+  WARLOCK_FAMILY_SIZE,
   type WarlockFamilyDeclaration,
 } from "../warlock-family.ts";
 
@@ -38,6 +39,8 @@ const FAMILY_NAMES = [
   "@warlock.js/queue",
   "@warlock.js/scheduler",
   "@warlock.js/seal",
+  "@warlock.js/sitemap",
+  "@warlock.js/devtools",
   "@warlock.js/web",
   "create-warlock",
 ] as const;
@@ -53,7 +56,7 @@ afterEach(async () => {
 test("loads the authoritative family and keeps Web/Core late and create-warlock last", async () => {
   const family = await loadAuthoritativeWarlockFamily();
 
-  assert.equal(family.members.length, 29);
+  assert.equal(family.members.length, WARLOCK_FAMILY_SIZE);
   assert.deepEqual(
     family.members.slice(-3).map(member => member.name),
     ["@warlock.js/web", "@warlock.js/core", "create-warlock"],
@@ -101,10 +104,13 @@ test("reports source version skew", async () => {
   await assert.rejects(deriveWarlockFamily(fixture), /lockstep version mismatch/);
 });
 
-test("uses 29 only as a secondary invariant after matching semantic sources", async () => {
+test("uses the declared family size only as a secondary invariant after matching semantic sources", async () => {
   const fixture = await createFixture(FAMILY_NAMES.slice(0, -1));
 
-  await assert.rejects(deriveWarlockFamily(fixture), /size invariant.*expected 29, found 28/);
+  await assert.rejects(
+    deriveWarlockFamily(fixture),
+    new RegExp(`size invariant.*expected ${WARLOCK_FAMILY_SIZE}, found ${WARLOCK_FAMILY_SIZE - 1}`),
+  );
 });
 
 async function createFixture(

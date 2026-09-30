@@ -212,7 +212,7 @@ function assertCandidate(input: LocalRegistryGateInput): void {
     )
   ) {
     throw new Error(
-      "expectedFamilyNames must contain exactly the 29-package Warlock family",
+      `expectedFamilyNames must contain exactly the ${WARLOCK_FAMILY_PACKAGE_NAMES.length}-package Warlock family`,
     );
   }
 
