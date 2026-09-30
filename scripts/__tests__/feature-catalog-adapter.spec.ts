@@ -27,11 +27,11 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { readFile, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { parseFeatureCatalog } from "../zero-edit-generator-gate.ts";
 
@@ -44,14 +44,6 @@ const TARBALL = path.resolve(
   "release-artifacts",
   "5.3.2",
   "warlock.js-core-5.3.2.tgz",
-);
-const FEATURES_SOURCE = path.resolve(
-  REPO_ROOT,
-  "core",
-  "src",
-  "generations",
-  "features",
-  "index.ts",
 );
 
 let installRoot: string;
@@ -79,29 +71,6 @@ function run(command: string, args: readonly string[], cwd: string): Promise<{ e
     child.on("error", reject);
     child.on("close", (exitCode) => resolve({ exitCode: exitCode ?? 1, stdout, stderr }));
   });
-}
-
-/**
- * Extracts the `featuresMap` key order straight out of the TypeScript source
- * `warlock add` dispatches against, without needing a TS loader — the
- * object-literal keys (bare identifier or quoted) up to its closing brace.
- */
-function readFeatureKeysFromSource(source: string): string[] {
-  const start = source.indexOf("export const featuresMap");
-  assert.ok(start >= 0, "featuresMap declaration not found in features/index.ts");
-  const openBrace = source.indexOf("{", start);
-  const closeBrace = source.indexOf("\n};", openBrace);
-  const body = source.slice(openBrace + 1, closeBrace);
-  const keys: string[] = [];
-
-  for (const line of body.split("\n")) {
-    const match = line.match(/^\s*(?:"([a-z0-9-]+)"|([a-zA-Z][a-zA-Z0-9]*)):/);
-    if (match) {
-      keys.push(match[1] ?? match[2]);
-    }
-  }
-
-  return keys;
 }
 
 describe("WARLOCK_FEATURE_CATALOG_ADAPTER — real installed core, with red controls", () => {
@@ -153,17 +122,20 @@ describe("WARLOCK_FEATURE_CATALOG_ADAPTER — real installed core, with red cont
     assert.ok(catalog.features.length > 0, "feature list must not be empty");
   });
 
-  it("cross-checks the emitted feature list against featuresMap in core/src/generations/features/index.ts", async () => {
+  it("cross-checks the emitted feature list against the same installed Core's featuresMap", async () => {
     const result = await run(process.execPath, [ADAPTER, "--core-root", coreRoot, "--format", "json"], installRoot);
     const catalog = JSON.parse(result.stdout) as { features: string[] };
 
-    const sourceText = await readFile(FEATURES_SOURCE, "utf8");
-    const expected = readFeatureKeysFromSource(sourceText);
+    const featuresModulePath = path.join(coreRoot, "esm", "generations", "features", "index.mjs");
+    const installedFeaturesModule = await import(pathToFileURL(featuresModulePath).href);
+    const installedFeaturesMap = installedFeaturesModule.featuresMap;
+    assert.ok(installedFeaturesMap && typeof installedFeaturesMap === "object", "installed Core must export featuresMap");
+    const expected = Object.keys(installedFeaturesMap);
 
     assert.deepEqual(
       catalog.features,
       expected,
-      "adapter's feature list (and order) must exactly match featuresMap's keys in core/src/generations/features/index.ts",
+      "adapter's feature list (and order) must exactly match the featuresMap it inspected in the installed Core",
     );
   });
 

@@ -124,6 +124,10 @@ jobs:
         working-directory: ws/builder
         run: npm ci --no-audit --no-fund
 
+      - name: Test release scripts
+        working-directory: ws/builder
+        run: npm run test:scripts
+
       - name: Generate the docs site's Astro types
         # `astro:content` types live in docs/.astro, which is generated and
         # gitignored; without it the strictness ratchet counts phantom errors.

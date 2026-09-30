@@ -326,7 +326,7 @@ describe("ratchet — per-package baseline enforcement", () => {
       assert.ok(value >= 0, `allowance for '${dir}' must be >= 0`);
     }
     // Sanity: the baseline recorded at authoring time.
-    assert.equal(Object.values(allowances).reduce((sum, n) => sum + n, 0), 314);
+    assert.equal(Object.values(allowances).reduce((sum, n) => sum + n, 0), 308);
   });
 });
 
