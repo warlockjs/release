@@ -457,7 +457,7 @@ describe("per-package clean-tree gate (card 9555ba00)", () => {
   });
 });
 
-describe("per-package own quality gate (test/typecheck)", () => {
+describe("per-package own quality gate (typecheck preflight, then test)", () => {
   const notificationsRoot = FAMILY.members[0].root; // "@warlock.js/notifications"
 
   // Deterministic stand-in for the real `resolveLocalPackageScript`: marks a
@@ -536,6 +536,16 @@ describe("per-package own quality gate (test/typecheck)", () => {
         // HTTP_PORT and NODE_ENV are cleared from every quality-check child env.
         assert.ok(runs.every((run) => !("HTTP_PORT" in run.env)));
         assert.ok(runs.every((run) => !("NODE_ENV" in run.env)));
+        assert.deepEqual(
+          runs.map((run) => run.args[1]),
+          ["tsc --noEmit", "tsc --noEmit", "vitest run", "vitest run"],
+          "every member must typecheck before the first test command runs",
+        );
+        assert.equal(
+          runs.filter((run) => run.args[1] === "tsc --noEmit").length,
+          FAMILY.members.length,
+          "each member's typecheck must run exactly once",
+        );
 
         const builds = control.commands.filter((command) => command.args[1] === "build");
         const packs = control.commands.filter((command) => command.args[1] === "pack");
@@ -549,6 +559,39 @@ describe("per-package own quality gate (test/typecheck)", () => {
       }
     },
   );
+
+  it("collects every red typecheck before refusing, without starting a test or build", async () => {
+    const control = withPackageScripts(new Map(), (request) => {
+      if (request.args[1] === "tsc --noEmit") {
+        return new Error(`${request.cwd}: typecheck failed`);
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "gate", version: VERSION, ...FULL_MATRIX }, control.dependencies),
+      (error) => {
+        const message = (error as Error).message;
+        assert.match(message, /one or more member typechecks are red/);
+        assert.match(message, /@warlock\.js\/notifications/);
+        assert.match(message, /create-warlock/);
+        assert.match(message, new RegExp(`"typecheck" \\(${RESOLVED_MARKER} `));
+        return true;
+      },
+    );
+
+    assert.ok(
+      control.commands.every(
+        (command) => command.command !== RESOLVED_MARKER || command.args[1] === "tsc --noEmit",
+      ),
+      "a red typecheck must prevent every test command",
+    );
+    assert.equal(
+      control.commands.filter((command) => command.args[1] === "build").length,
+      0,
+      "a red typecheck must prevent every build command",
+    );
+  });
 
   it(
     "RED CONTROL (two-sided): breaking ONE package's test suite refuses only that package " +
@@ -662,7 +705,7 @@ describe("per-package own quality gate (test/typecheck)", () => {
         (error) => {
           const message = (error as Error).message;
           assert.match(message, /Refusing to pack @warlock\.js\/notifications/);
-          assert.match(message, /resolving "vitest run"/);
+          assert.match(message, /resolving "tsc --noEmit"/);
           assert.match(message, /no node_modules\/\.bin\/vitest found/);
           return true;
         },

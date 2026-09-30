@@ -486,6 +486,12 @@ async function prepareAndGate(
   // gate outright, with no handoff, same as every other refusal below.
   const strictness = await runStrictnessRatchet(options.skipStrictness, runtime);
 
+  // Typecheck the whole family before deciding whether to reuse artifacts or
+  // begin any build. Reuse still skips the per-member test/build work below,
+  // but it must not let an already-built tarball conceal a red typecheck in
+  // the source tree we are about to release.
+  await checkAllMembersTypecheck(family, runtime);
+
   let artifacts: CandidateArtifact[] | undefined;
   let reusedArtifacts = false;
   let reuseProvenance: BuildProvenanceEntry[] | undefined;
@@ -632,7 +638,7 @@ async function buildAndPackAllMembers(
 
     // Same call site, same shape: the gate proves the family graph, the
     // pins, and a clean tree per member, but none of that says the
-    // package's OWN test/typecheck scripts are green — a package can be red
+    // package's OWN test script is green — a package can be red
     // in its own repository and still sail through everything above. Check
     // it here, immediately before this member's own build+pack, so a red
     // suite refuses ONLY this member and the other 27 keep going.
@@ -1114,8 +1120,9 @@ export async function checkPackageTreeIsClean(
   return { clean: false, refusalMessage, dirtyInSurface, waivedOutsideSurface, surface };
 }
 
-/** The scripts this gate holds every family member to, in check order. */
-const OWN_QUALITY_SCRIPTS = ["test", "typecheck"] as const;
+/** The scripts this gate holds every family member to during its pack loop. */
+const OWN_QUALITY_SCRIPTS = ["test"] as const;
+const TYPECHECK_QUALITY_SCRIPTS = ["typecheck"] as const;
 
 export interface PackageOwnQualityResult {
   passed: boolean;
@@ -1125,8 +1132,9 @@ export interface PackageOwnQualityResult {
 }
 
 /**
- * Run one package's OWN `test` and `typecheck` scripts, immediately before
- * it is built and packed.
+ * Run one package's OWN `test` script immediately before it is built and
+ * packed. Typechecks are deliberately run in a family-wide fail-fast phase
+ * before any test command can begin.
  *
  * The rest of this gate proves the family graph, exact pins, a clean single
  * -Core install, generated-app typecheck, boot, build, start, and browser
@@ -1146,6 +1154,40 @@ export async function checkPackageOwnQuality(
   member: WarlockFamilyMember,
   runtime: Runtime,
 ): Promise<PackageOwnQualityResult> {
+  return await checkPackageQualityScripts(member, runtime, OWN_QUALITY_SCRIPTS);
+}
+
+/**
+ * Run every member's typecheck in family order before any test or build work.
+ * Keep collecting failures so a single gate attempt tells the owner every
+ * package that is red, rather than revealing them one release retry at a time.
+ */
+async function checkAllMembersTypecheck(
+  family: WarlockFamily,
+  runtime: Runtime,
+): Promise<void> {
+  const refusals: string[] = [];
+
+  for (const member of family.members) {
+    const quality = await checkPackageQualityScripts(member, runtime, TYPECHECK_QUALITY_SCRIPTS);
+    if (!quality.passed) refusals.push(quality.refusalMessage);
+  }
+
+  if (refusals.length > 0) {
+    throw new Error(
+      [
+        "Refusing to gate: one or more member typechecks are red.",
+        ...refusals,
+      ].join("\n\n"),
+    );
+  }
+}
+
+async function checkPackageQualityScripts(
+  member: WarlockFamilyMember,
+  runtime: Runtime,
+  scriptNames: readonly string[],
+): Promise<PackageOwnQualityResult> {
   const manifestPath = path.join(member.root, "package.json");
   const manifest = parseManifest(await runtime.readTextFile(manifestPath), manifestPath);
   const scripts = isStringRecord(manifest.scripts) ? manifest.scripts : {};
@@ -1153,7 +1195,7 @@ export async function checkPackageOwnQuality(
   const failures: string[] = [];
   const skipped: string[] = [];
 
-  for (const scriptName of OWN_QUALITY_SCRIPTS) {
+  for (const scriptName of scriptNames) {
     const command = scripts[scriptName];
     if (typeof command !== "string" || command.trim().length === 0) {
       skipped.push(scriptName);
