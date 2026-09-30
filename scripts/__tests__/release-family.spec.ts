@@ -1747,6 +1747,44 @@ describe("runReleaseFamily publish mode", () => {
       "[2/2] create-warlock: published",
     ]);
   });
+
+  it("names npm's invisible staged-version conflict instead of passing E409 through", async () => {
+    const artifacts = FAMILY.members.map((member, index) => ({
+      name: member.name,
+      tarballPath: path.resolve(`artifact-${index}.tgz`),
+      sha256: HASH,
+    }));
+    const control = fixture({
+      readTextFile: async () =>
+        JSON.stringify({
+          kind: "warlock-family-publish-handoff",
+          candidateVersion: VERSION,
+          subjects: FAMILY.members.map((member) => member.name),
+          artifacts,
+          verifiedAt: "2026-09-02T12:00:00.000Z",
+          matrixScope: "full",
+        }),
+      runCommand: async (request) => {
+        if (request.args[1] === "config") return { stdout: `${NPM_ORIGIN}/\n`, stderr: "" };
+        if (request.args[1] === "publish") {
+          throw new Error(
+            `npm error code E409\nnpm error 409 Conflict - Cannot publish over previously staged version "${VERSION}".`,
+          );
+        }
+        return { stdout: "", stderr: "" };
+      },
+    });
+
+    await assert.rejects(
+      runReleaseFamily({ mode: "publish", version: VERSION }, control.dependencies),
+      (error: Error) =>
+        error.message.startsWith(
+          `@warlock.js/notifications@${VERSION} is held by npm as a staged publish`,
+        ) &&
+        error.message.includes("next patch version") &&
+        error.message.includes("E409"),
+    );
+  });
 });
 
 describe("--reuse-artifacts", () => {

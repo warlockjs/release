@@ -1823,32 +1823,52 @@ async function publishHandoff(handoff: ReleaseHandoff, runtime: Runtime): Promis
         continue;
       }
 
-      await runtime.runCommand({
-        command: process.execPath,
-        args: [
-          runtime.resolveNpmCli(),
-          "publish",
-          artifact.tarballPath,
-          "--registry",
-          NPM_ORIGIN,
-          "--access",
-          "public",
-          "--ignore-scripts",
-          "--cache",
-          cache,
-          "--userconfig",
-          userconfig,
-          "--globalconfig",
-          globalconfig,
-        ],
-        cwd: root,
-        env,
-      });
+      await runtime
+        .runCommand({
+          command: process.execPath,
+          args: [
+            runtime.resolveNpmCli(),
+            "publish",
+            artifact.tarballPath,
+            "--registry",
+            NPM_ORIGIN,
+            "--access",
+            "public",
+            "--ignore-scripts",
+            "--cache",
+            cache,
+            "--userconfig",
+            userconfig,
+            "--globalconfig",
+            globalconfig,
+          ],
+          cwd: root,
+          env,
+        })
+        .catch((error: unknown) => {
+          throw stagedPublishError(error, artifact.name, handoff.candidateVersion);
+        });
       runtime.report(`[${index + 1}/${total}] ${artifact.name}: published`);
     }
   } finally {
     await runtime.removeDirectory(root);
   }
+}
+
+/**
+ * npm can accept an upload, answer success, and then hold the version
+ * "staged": invisible to `npm view` yet occupying its number, so every
+ * retry answers E409 (npm/cli#9889). Name that state instead of passing
+ * npm's raw conflict through; the number may be burnt.
+ */
+function stagedPublishError(error: unknown, name: string, version: string): unknown {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/previously staged version/i.test(message)) return error;
+  return new Error(
+    `${name}@${version} is held by npm as a staged publish that is not visible at the registry ` +
+      `(npm/cli#9889). Re-running cannot publish over it: wait for npm to release it, ask npm ` +
+      `support to clear it, or release the family at the next patch version.\n\n${message}`,
+  );
 }
 
 type SubjectConfirmationStatus = "live" | "pending" | "missing";
