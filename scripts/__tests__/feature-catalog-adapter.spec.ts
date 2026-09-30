@@ -27,6 +27,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -38,13 +39,16 @@ import { parseFeatureCatalog } from "../zero-edit-generator-gate.ts";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, "..", "..", "..");
 const ADAPTER = path.resolve(HERE, "..", "adapters", "feature-catalog-adapter.mjs");
-const TARBALL = path.resolve(
+const LOCAL_TARBALL = path.resolve(
   REPO_ROOT,
   "builder",
   "release-artifacts",
   "5.3.2",
   "warlock.js-core-5.3.2.tgz",
 );
+// release-artifacts/ is local-only (gitignored); a fresh checkout such as the
+// CI runner installs the same published 5.3.2 from the registry instead.
+const TARBALL = existsSync(LOCAL_TARBALL) ? LOCAL_TARBALL : "@warlock.js/core@5.3.2";
 
 let installRoot: string;
 let coreRoot: string;

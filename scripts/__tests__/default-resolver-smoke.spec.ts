@@ -94,10 +94,7 @@ describe("default-resolver smoke — real startup path, no injection", () => {
     delete process.env.npm_execpath;
     try {
       const resolved = resolveNpmCli();
-      const expected = path.resolve(
-        path.dirname(process.execPath),
-        "node_modules/npm/bin/npm-cli.js",
-      );
+      const expected = nodeAdjacentNpmCli();
       assert.equal(
         resolved,
         expected,
@@ -128,15 +125,27 @@ describe("default-resolver smoke — real startup path, no injection", () => {
  * helper never depends on the smoke check's own subject to find its fixture.
  */
 function discoverARealNpmCliJs(): string {
-  const candidate = path.resolve(
-    path.dirname(process.execPath),
-    "node_modules/npm/bin/npm-cli.js",
-  );
-  if (!existsSync(candidate)) {
+  return nodeAdjacentNpmCli();
+}
+
+/**
+ * The npm CLI installed with the running Node, in either platform layout:
+ * Windows keeps `node_modules` beside `node.exe`; Linux and macOS keep it in
+ * `<prefix>/lib/node_modules` with node in `<prefix>/bin`. Mirrors the two
+ * candidates the resolver itself checks, first match wins.
+ */
+function nodeAdjacentNpmCli(): string {
+  const nodeDir = path.dirname(process.execPath);
+  const candidates = [
+    path.resolve(nodeDir, "node_modules/npm/bin/npm-cli.js"),
+    path.resolve(nodeDir, "../lib/node_modules/npm/bin/npm-cli.js"),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
     throw new Error(
-      `Cannot exercise resolveNpmCli()'s npm_execpath branch: no npm-cli.js found at ${candidate}. ` +
+      `Cannot exercise resolveNpmCli(): no npm-cli.js found at ${candidates.join(" or ")}. ` +
         "This machine has no installed npm CLI beside its Node binary to use as a forced fixture.",
     );
   }
-  return candidate;
+  return found;
 }

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createReadStream, existsSync, readFileSync } from "node:fs";
+import { createReadStream, existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -1681,6 +1681,10 @@ function binaryEntryFromShim(modulesDirectory: string, binaryName: string): stri
   const shimPath = path.join(modulesDirectory, ".bin", binaryName);
 
   if (!existsSync(shimPath)) return undefined;
+
+  // npm on Linux/macOS links .bin entries straight to the package's entry file
+  // rather than writing a shell shim, so the link target IS the entry.
+  if (lstatSync(shimPath).isSymbolicLink()) return realpathSync(shimPath);
 
   const target = readFileSync(shimPath, "utf8").match(/\.\.\/[A-Za-z0-9@/_.-]+/)?.[0];
 
