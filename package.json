@@ -14,6 +14,7 @@
     "list": "pkgist list",
     "check:features": "node --import tsx scripts/check-feature-parity.ts",
     "check:skill-snippets": "node --import tsx scripts/skill-snippet-gate.ts",
+    "check:skill-path-refs": "node --import tsx scripts/skill-path-refs.ts",
     "check:no-pnpm-in-shipped-docs": "node --import tsx scripts/no-pnpm-in-shipped-docs.ts",
     "test:scripts": "node --import tsx --test \"scripts/__tests__/*.spec.ts\"",
     "test:resolver-smoke": "node --import tsx --test scripts/__tests__/default-resolver-smoke.spec.ts"

@@ -128,6 +128,11 @@ jobs:
         working-directory: ws/builder
         run: npm run test:scripts
 
+      - name: Skill cross-references name topics, not paths
+        # agent-kit flattens skills into an app on install, so `../x/SKILL.md` breaks there.
+        working-directory: ws/builder
+        run: npm run check:skill-path-refs
+
       - name: Generate the docs site's Astro types
         # `astro:content` types live in docs/.astro, which is generated and
         # gitignored; without it the strictness ratchet counts phantom errors.
