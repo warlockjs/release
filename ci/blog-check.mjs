@@ -13,6 +13,7 @@
 //   5. recreate the database empty, then `pnpm run migrate`, `pnpm run seed`
 //   6. `warlock dev`: a /posts request shows up at /__warlock/api with its
 //      phases and queries, and EXPLAIN works on one of its SELECTs
+//      the API docs: OpenAPI 3.1 + Postman v2.1 JSON, Scalar + Swagger UI pages (5.28+)
 //   7. `pnpm run build` + `warlock start`: ready banner, browser smoke,
 //      /__warlock is a 404 in production
 //   8. deploy in parts: `--role=worker` binds no port, `--role=api` serves
@@ -1057,12 +1058,48 @@ async function checkDevtoolsInDev(context, details) {
 
     details.mailboxEntries = mails.length;
 
+    await checkApiDocsInDev(details);
+
     if (!server.output().includes(LINES.devtoolsReady)) {
       throw new Error(`dev log lacks "${LINES.devtoolsReady}"`);
     }
 
     details.log = server.logFile;
   });
+}
+
+const POSTMAN_SCHEMA = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
+
+/**
+ * The API docs devtools serves in dev: the OpenAPI document built from the
+ * blog's routes, the Postman collection built from that document, and the
+ * Scalar and Swagger UI pages that render it.
+ */
+async function checkApiDocsInDev(details) {
+  const openapi = await getJson(`${BASE_URL}${DEVTOOLS_PATH}/api/openapi.json`, "devtools OpenAPI document");
+  const paths = Object.keys(openapi?.paths ?? {}).length;
+
+  if (!String(openapi?.openapi ?? "").startsWith("3.1") || paths === 0) {
+    throw new Error(`devtools OpenAPI document is not 3.1 with paths (openapi=${openapi?.openapi}, paths=${paths})`);
+  }
+
+  const collection = await getJson(`${BASE_URL}${DEVTOOLS_PATH}/api/postman.json`, "devtools Postman collection");
+
+  if (collection?.info?.schema !== POSTMAN_SCHEMA || !Array.isArray(collection.item) || collection.item.length === 0) {
+    throw new Error(
+      `devtools Postman collection is not a non-empty v2.1.0 collection (schema=${collection?.info?.schema}, items=${collection?.item?.length})`,
+    );
+  }
+
+  for (const docsPath of ["/docs", "/docs/swagger"]) {
+    const page = await httpRequest(`${BASE_URL}${DEVTOOLS_PATH}${docsPath}`);
+
+    if (page.status !== 200 || !page.contentType.includes("text/html")) {
+      throw new Error(`GET ${DEVTOOLS_PATH}${docsPath} in dev returned ${page.status} ${page.contentType}`);
+    }
+  }
+
+  details.apiDocs = { openapi: openapi.openapi, paths, postmanTopLevelItems: collection.item.length };
 }
 
 // ─── step 7: production + browser smoke ──────────────────────────────────────
