@@ -10,7 +10,7 @@
 //   2. write a CI .env (dummy mail/storage/auth values, Postgres from the service)
 //   3. wire devtools the way a user does: `warlock add devtools --no-install`
 //   4. `warlock generate.typings`, then `tsc --noEmit`
-//   5. `pnpm run migrate`, `pnpm run seed`
+//   5. recreate the database empty, then `pnpm run migrate`, `pnpm run seed`
 //   6. `warlock dev`: a /posts request shows up at /__warlock/api with its
 //      phases and queries, and EXPLAIN works on one of its SELECTs
 //   7. `pnpm run build` + `warlock start`: ready banner, browser smoke,
@@ -256,12 +256,12 @@ function childEnv() {
  * Spawns `command` in its own process group, teeing stdout+stderr into a log
  * file and an in-memory buffer. A watchdog kills the group at `timeoutMs`.
  */
-function spawnLogged(label, command, args, { cwd, logsDir, timeoutMs }) {
+function spawnLogged(label, command, args, { cwd, logsDir, timeoutMs, env = {} }) {
   const logFile = path.join(logsDir, `${label}.log`);
   const logStream = fs.createWriteStream(logFile);
   const child = spawn(command, args, {
     cwd,
-    env: childEnv(),
+    env: { ...childEnv(), ...env },
     stdio: ["ignore", "pipe", "pipe"],
     detached: true,
   });
@@ -891,9 +891,38 @@ async function typecheck(context, details) {
 // ─── step 5: database ────────────────────────────────────────────────────────
 
 async function migrateAndSeed(context, details) {
+  await resetDatabase(context);
   await runPnpm(context, "migrate", ["run", "migrate"]);
   await runPnpm(context, "seed", ["run", "seed"]);
-  details.database = `${context.db.host}:${context.db.port}/${context.db.name}`;
+  details.database = `${context.db.host}:${context.db.port}/${context.db.name} (recreated empty)`;
+}
+
+/**
+ * Drops and recreates the blog database. The release job runs this check twice
+ * (tarballs, then registry) against one Postgres service; the second run must
+ * start from an empty database, not the first run's migrated and seeded rows.
+ */
+async function resetDatabase(context) {
+  const { host, port, username, password, name } = context.db;
+
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(`DB_NAME must be a plain identifier, got "${name}"`);
+  }
+
+  await runCommand(
+    "reset-database",
+    "psql",
+    [
+      "-h", host,
+      "-p", String(port),
+      "-U", username,
+      "-d", "postgres",
+      "-v", "ON_ERROR_STOP=1",
+      "-c", `DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`,
+      "-c", `CREATE DATABASE "${name}"`,
+    ],
+    { cwd: context.blogDir, logsDir: context.logsDir, timeoutMs: TIMEOUTS.command, env: { PGPASSWORD: password } },
+  );
 }
 
 // ─── step 6: devtools in dev ─────────────────────────────────────────────────
